@@ -3,17 +3,17 @@
 // PARANA PROJECT
 // Institutional Market Intelligence
 //------------------------------------------------------------------------------
-// Version : v0.3.0 Swing Classification
+// Version : v0.4.0 Structure Breaks
 // Type    : Indicator
 //
-// This release classifies every accepted swing as HH, HL, LH, or LL by
-// comparing it with the previous accepted swing of the same type. It does not
-// issue trade signals, BOS, or CHoCH events.
+// This release detects confirmed close-based breaks of the latest swing high
+// or low. It shows BOS upward/downward events and the resulting trend state.
+// It does not issue trade signals or CHoCH events.
 //==============================================================================
 
 indicator(
-     title = "Parana Project v0.3.0 - Swing Classification",
-     shorttitle = "PARANA v0.3",
+     title = "Parana Project v0.4.0 - Structure Breaks",
+     shorttitle = "PARANA v0.4",
      overlay = true,
      max_labels_count = 200,
      max_lines_count = 200,
@@ -25,8 +25,8 @@ indicator(
 //==============================================================================
 
 const string c_PROJECT_NAME = "PARANA PROJECT"
-const string c_VERSION = "v0.3.0 Swing Classification"
-const string c_ENGINE_NAME = "Parana Swing Engine"
+const string c_VERSION = "v0.4.0 Structure Breaks"
+const string c_ENGINE_NAME = "Parana Structure Engine"
 const string c_STATUS_RUNNING = "RUNNING"
 
 const int c_SWING_HIGH = 1
@@ -35,7 +35,7 @@ const int c_MAX_SWINGS = 200
 const int c_MAX_RENDERED_LABELS = 190
 
 const int c_DASHBOARD_COLUMNS = 2
-const int c_DASHBOARD_ROWS = 9
+const int c_DASHBOARD_ROWS = 10
 
 //==============================================================================
 // 02. USER CONFIGURATION
@@ -43,7 +43,8 @@ const int c_DASHBOARD_ROWS = 9
 
 string cfg_groupGeneral = "01 - General"
 string cfg_groupSwing = "02 - Swing Engine"
-string cfg_groupDev = "03 - Development"
+string cfg_groupStructure = "03 - Structure Breaks"
+string cfg_groupDev = "04 - Development"
 
 bool cfg_showDashboard = input.bool(
      defval = true,
@@ -84,6 +85,13 @@ bool cfg_showStrength = input.bool(
      tooltip = "Adds the initial 0-100 strength estimate to swing labels."
 )
 
+bool cfg_showStructureBreaks = input.bool(
+     defval = true,
+     title = "Show confirmed structure breaks",
+     group = cfg_groupStructure,
+     tooltip = "Shows BOS only after a candle closes beyond the latest confirmed swing level."
+)
+
 bool cfg_developerMode = input.bool(
      defval = false,
      title = "Developer mode",
@@ -120,6 +128,10 @@ var array<label> g_swingLabels = array.new<label>(0)
 var int g_nextSwingId = 1
 var string g_lastLog = "Engine initialized"
 var string g_engineStatus = c_STATUS_RUNNING
+var string g_trendState = "NEUTRAL"
+var string g_lastStructureEvent = "None"
+var int g_lastBullBreakSwingId = na
+var int g_lastBearBreakSwingId = na
 
 var table g_dashboard = table.new(
      position.top_right,
@@ -192,6 +204,17 @@ f_lastPriceByKind(int _kind) =>
                 break
     lastPrice
 
+f_lastIdByKind(int _kind) =>
+    int lastId = na
+    int swingCount = array.size(g_swings)
+    if swingCount > 0
+        for i = swingCount - 1 to 0
+            Swing savedSwing = array.get(g_swings, i)
+            if savedSwing.kind == _kind
+                lastId := savedSwing.id
+                break
+    lastId
+
 // Market-structure classification v1. Equal highs/lows remain classified as
 // LH/HL in this release. Dedicated equal-high/low liquidity logic comes later.
 f_classifySwing(int _kind, float _price) =>
@@ -245,6 +268,27 @@ f_drawSwing(Swing _swing) =>
              style = labelStyle,
              textcolor = color.white,
              size = size.tiny
+        )
+
+        if array.size(g_swingLabels) >= c_MAX_RENDERED_LABELS
+            label.delete(array.shift(g_swingLabels))
+        array.push(g_swingLabels, newLabel)
+
+f_drawStructureBreak(bool _isBullish, float _level) =>
+    if cfg_showStructureBreaks
+        string breakText = _isBullish ? "BOS UP" : "BOS DOWN"
+        color breakColor = _isBullish ? color.aqua : color.orange
+        labelStyle = _isBullish ? label.style_label_up : label.style_label_down
+        label newLabel = label.new(
+             bar_index,
+             _level,
+             breakText,
+             xloc = xloc.bar_index,
+             yloc = yloc.price,
+             color = breakColor,
+             style = labelStyle,
+             textcolor = color.black,
+             size = size.small
         )
 
         if array.size(g_swingLabels) >= c_MAX_RENDERED_LABELS
@@ -307,9 +351,12 @@ f_renderDashboard() =>
             f_setDashboardCell(0, 7, "Pivot length", labelBackground, color.silver)
             f_setDashboardCell(1, 7, str.tostring(cfg_pivotLength), valueBackground, color.white)
 
+            f_setDashboardCell(0, 8, "Trend state", labelBackground, color.silver)
+            f_setDashboardCell(1, 8, g_trendState, valueBackground, color.white)
+
             string logText = cfg_developerMode ? g_lastLog : "Enable Developer mode for log"
-            f_setDashboardCell(0, 8, "Log", labelBackground, color.silver)
-            f_setDashboardCell(1, 8, logText, valueBackground, color.white)
+            f_setDashboardCell(0, 9, "Last event", labelBackground, color.silver)
+            f_setDashboardCell(1, 9, cfg_developerMode ? logText : g_lastStructureEvent, valueBackground, color.white)
 
 //==============================================================================
 // 08. MAIN LOOP
@@ -339,9 +386,35 @@ else if sw_newLow
     else
         g_lastLog := "Rejected SL: alternation or distance filter"
 
+// Breaks use only the current, fully closed candle and a level belonging to a
+// previously confirmed pivot. This prevents intrabar BOS labels from repainting.
+float str_lastHighPrice = f_lastPriceByKind(c_SWING_HIGH)
+float str_lastLowPrice = f_lastPriceByKind(c_SWING_LOW)
+int str_lastHighId = f_lastIdByKind(c_SWING_HIGH)
+int str_lastLowId = f_lastIdByKind(c_SWING_LOW)
+
+bool str_crossedAboveLastHigh = ta.crossover(close, str_lastHighPrice)
+bool str_crossedBelowLastLow = ta.crossunder(close, str_lastLowPrice)
+bool str_bullBreak = barstate.isconfirmed and not na(str_lastHighPrice) and str_crossedAboveLastHigh and (na(g_lastBullBreakSwingId) or str_lastHighId != g_lastBullBreakSwingId)
+bool str_bearBreak = barstate.isconfirmed and not na(str_lastLowPrice) and str_crossedBelowLastLow and (na(g_lastBearBreakSwingId) or str_lastLowId != g_lastBearBreakSwingId)
+
+if str_bullBreak
+    g_trendState := "BULLISH"
+    g_lastBullBreakSwingId := str_lastHighId
+    g_lastStructureEvent := "BOS UP @ " + str.tostring(str_lastHighPrice, format.mintick)
+    g_lastLog := g_lastStructureEvent
+    f_drawStructureBreak(true, str_lastHighPrice)
+
+else if str_bearBreak
+    g_trendState := "BEARISH"
+    g_lastBearBreakSwingId := str_lastLowId
+    g_lastStructureEvent := "BOS DOWN @ " + str.tostring(str_lastLowPrice, format.mintick)
+    g_lastLog := g_lastStructureEvent
+    f_drawStructureBreak(false, str_lastLowPrice)
+
 f_renderDashboard()
 
 //==============================================================================
-// END OF v0.3.0 SWING CLASSIFICATION
-// Next planned increment: v0.4.0 Break of Structure and trend-state logic.
+// END OF v0.4.0 STRUCTURE BREAKS
+// Next planned increment: v0.5.0 CHoCH and Market Structure Shift logic.
 //==============================================================================

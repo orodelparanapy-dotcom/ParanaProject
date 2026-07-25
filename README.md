@@ -3,16 +3,17 @@
 // PARANA PROJECT
 // Institutional Market Intelligence
 //------------------------------------------------------------------------------
-// Version : v0.9.0 Volume Context
+// Version : v1.0.0 Decision Profile
 // Type    : Indicator
 //
-// This release measures confirmed relative volume and current participation.
-// It remains diagnostic: volume does not create an entry or trade instruction.
+// This release integrates structure, higher-timeframe alignment, and volume
+// into a transparent decision profile. It remains diagnostic and does not
+// emit entries, exits, or buy/sell instructions.
 //==============================================================================
 
 indicator(
-     title = "Parana Project v0.9.0 - Volume Context",
-     shorttitle = "PARANA v0.9",
+     title = "Parana Project v1.0.0 - Decision Profile",
+     shorttitle = "PARANA v1.0",
      overlay = true,
      max_labels_count = 200,
      max_lines_count = 200,
@@ -24,7 +25,7 @@ indicator(
 //==============================================================================
 
 const string c_PROJECT_NAME = "PARANA PROJECT"
-const string c_VERSION = "v0.9.0 Volume Context"
+const string c_VERSION = "v1.0.0 Decision Profile"
 const string c_ENGINE_NAME = "Parana Structure Engine"
 const string c_STATUS_RUNNING = "RUNNING"
 
@@ -34,7 +35,7 @@ const int c_MAX_SWINGS = 200
 const int c_MAX_RENDERED_LABELS = 190
 
 const int c_DASHBOARD_COLUMNS = 2
-const int c_DASHBOARD_ROWS = 25
+const int c_DASHBOARD_ROWS = 32
 
 //==============================================================================
 // 02. USER CONFIGURATION
@@ -46,7 +47,8 @@ string cfg_groupStructure = "03 - Structure Breaks"
 string cfg_groupMtf = "04 - Higher-Timeframe Context"
 string cfg_groupHorizon = "05 - Trade Horizon"
 string cfg_groupVolume = "06 - Volume Context"
-string cfg_groupDev = "07 - Development"
+string cfg_groupDecision = "07 - Decision Profile"
+string cfg_groupDev = "08 - Development"
 
 bool cfg_showDashboard = input.bool(
      defval = true,
@@ -152,6 +154,13 @@ float cfg_highRelativeVolume = input.float(
      step = 0.05,
      group = cfg_groupVolume,
      tooltip = "A relative-volume ratio at or above this level is classified as high participation."
+)
+
+bool cfg_showDecisionProfile = input.bool(
+     defval = true,
+     title = "Show decision profile",
+     group = cfg_groupDecision,
+     tooltip = "Combines local structure, HTF alignment, and volume into an explainable diagnostic profile."
 )
 
 bool cfg_developerMode = input.bool(
@@ -274,6 +283,29 @@ f_volumeParticipation(float _relativeVolume, float _confirmedClose, float _confi
     na(_relativeVolume) ? "NO VOLUME DATA" :
      supportsBullish or supportsBearish ? "SUPPORTIVE" :
      _relativeVolume < 0.75 ? "WEAK PARTICIPATION" : "NOT CONFIRMING"
+
+// Decision Profile v1 weights:
+// Structure 45%, higher-timeframe alignment 30%, volume 25%.
+// Penalties prevent a visually strong chart from receiving a high profile when
+// participation is weak or higher-timeframe context is conflicted.
+f_decisionScore(float _structureScore, float _htfAlignment, float _volumeScore) =>
+    float score = _structureScore * 0.45 + _htfAlignment * 0.30 + _volumeScore * 0.25
+    if _volumeScore < 55.0
+        score -= 10.0
+    if _htfAlignment < 66.0
+        score -= 10.0
+    math.max(0.0, math.min(score, 100.0))
+
+f_decisionClass(float _score) =>
+    _score >= 90.0 ? "S" : _score >= 80.0 ? "A" : _score >= 70.0 ? "B" : _score >= 60.0 ? "C" : "OBSERVE"
+
+f_decisionContext(float _score) =>
+    _score >= 85.0 ? "HIGH CONFLUENCE" : _score >= 70.0 ? "CONDITIONAL CONTEXT" : _score >= 60.0 ? "MIXED CONTEXT" : "WAIT FOR CLARITY"
+
+f_primaryCaution(float _structureScore, float _htfAlignment, float _volumeScore) =>
+    _volumeScore < 55.0 ? "Low volume participation" :
+     _htfAlignment < 66.0 ? "Higher-timeframe conflict" :
+     _structureScore < 70.0 ? "Structure needs confirmation" : "No critical caution"
 
 // This compact, stateful structure model runs inside request.security(). It is
 // intentionally display-only in v0.8.0; the full local PSE remains the source
@@ -614,6 +646,32 @@ f_renderDashboard() =>
                 f_setDashboardCell(0, 24, "Participation", labelBackground, color.silver)
                 f_setDashboardCell(1, 24, f_volumeParticipation(vol_relativeConfirmed, vol_confirmedClose, vol_confirmedOpen), valueBackground, color.white)
 
+            if cfg_showDecisionProfile
+                float decisionStructureScore = f_structureScore()
+                float decisionVolumeScore = f_volumeScore(vol_relativeConfirmed)
+                float decisionScore = f_decisionScore(decisionStructureScore, htfAlignment, decisionVolumeScore)
+
+                f_setDashboardCell(0, 25, "Decision score", labelBackground, color.silver)
+                f_setDashboardCell(1, 25, str.tostring(decisionScore, "#.0") + " / 100", valueBackground, color.white)
+
+                f_setDashboardCell(0, 26, "Decision class", labelBackground, color.silver)
+                f_setDashboardCell(1, 26, f_decisionClass(decisionScore), valueBackground, color.white)
+
+                f_setDashboardCell(0, 27, "Profile", labelBackground, color.silver)
+                f_setDashboardCell(1, 27, f_decisionContext(decisionScore), valueBackground, color.white)
+
+                f_setDashboardCell(0, 28, "Structure weight", labelBackground, color.silver)
+                f_setDashboardCell(1, 28, str.tostring(decisionStructureScore * 0.45, "#.0") + " / 45", valueBackground, color.white)
+
+                f_setDashboardCell(0, 29, "HTF weight", labelBackground, color.silver)
+                f_setDashboardCell(1, 29, str.tostring(htfAlignment * 0.30, "#.0") + " / 30", valueBackground, color.white)
+
+                f_setDashboardCell(0, 30, "Volume weight", labelBackground, color.silver)
+                f_setDashboardCell(1, 30, str.tostring(decisionVolumeScore * 0.25, "#.0") + " / 25", valueBackground, color.white)
+
+                f_setDashboardCell(0, 31, "Caution", labelBackground, color.silver)
+                f_setDashboardCell(1, 31, f_primaryCaution(decisionStructureScore, htfAlignment, decisionVolumeScore), valueBackground, color.white)
+
 //==============================================================================
 // 08. MAIN LOOP
 //==============================================================================
@@ -675,6 +733,6 @@ else if str_bearBreak
 f_renderDashboard()
 
 //==============================================================================
-// END OF v0.9.0 VOLUME CONTEXT
-// Next planned increment: v1.0.0 Decision profile and explanation engine.
+// END OF v1.0.0 DECISION PROFILE
+// Next planned increment: v1.1.0 Liquidity sweep diagnostics.
 //==============================================================================

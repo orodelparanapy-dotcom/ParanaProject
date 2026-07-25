@@ -3,17 +3,17 @@
 // PARANA PROJECT
 // Institutional Market Intelligence
 //------------------------------------------------------------------------------
-// Version : v0.2.0 Swing Engine
+// Version : v0.3.0 Swing Classification
 // Type    : Indicator
 //
-// This release detects confirmed price pivots, applies an initial noise filter,
-// enforces High/Low alternation, stores accepted swings, and optionally draws
-// non-repainting SH / SL labels. It does not issue trade signals.
+// This release classifies every accepted swing as HH, HL, LH, or LL by
+// comparing it with the previous accepted swing of the same type. It does not
+// issue trade signals, BOS, or CHoCH events.
 //==============================================================================
 
 indicator(
-     title = "Parana Project v0.2.0 - Swing Engine",
-     shorttitle = "PARANA v0.2",
+     title = "Parana Project v0.3.0 - Swing Classification",
+     shorttitle = "PARANA v0.3",
      overlay = true,
      max_labels_count = 200,
      max_lines_count = 200,
@@ -25,7 +25,7 @@ indicator(
 //==============================================================================
 
 const string c_PROJECT_NAME = "PARANA PROJECT"
-const string c_VERSION = "v0.2.0 Swing Engine"
+const string c_VERSION = "v0.3.0 Swing Classification"
 const string c_ENGINE_NAME = "Parana Swing Engine"
 const string c_STATUS_RUNNING = "RUNNING"
 
@@ -152,7 +152,7 @@ f_lastSwingText() =>
         "None"
     else
         Swing lastSwing = array.get(g_swings, array.size(g_swings) - 1)
-        f_swingShortText(lastSwing.kind) + " @ " + str.tostring(lastSwing.price, format.mintick)
+        lastSwing.state + " @ " + str.tostring(lastSwing.price, format.mintick)
 
 //==============================================================================
 // 06. SWING ENGINE
@@ -163,7 +163,7 @@ f_storeSwing(Swing _swing) =>
         array.shift(g_swings)
     array.push(g_swings, _swing)
 
-f_newSwing(int _kind, float _price, int _barIndex, int _timestamp, float _strength) =>
+f_newSwing(int _kind, float _price, int _barIndex, int _timestamp, float _strength, string _classification) =>
     Swing.new(
          g_nextSwingId,
          _kind,
@@ -176,8 +176,34 @@ f_newSwing(int _kind, float _price, int _barIndex, int _timestamp, float _streng
          na,
          na,
          _strength,
-         "confirmed"
+         _classification
     )
+
+// Finds the most recent accepted swing of the requested type. The new swing
+// is classified before storage, so this always returns the prior comparison.
+f_lastPriceByKind(int _kind) =>
+    float lastPrice = na
+    int swingCount = array.size(g_swings)
+    if swingCount > 0
+        for i = swingCount - 1 to 0
+            Swing savedSwing = array.get(g_swings, i)
+            if savedSwing.kind == _kind
+                lastPrice := savedSwing.price
+                break
+    lastPrice
+
+// Market-structure classification v1. Equal highs/lows remain classified as
+// LH/HL in this release. Dedicated equal-high/low liquidity logic comes later.
+f_classifySwing(int _kind, float _price) =>
+    float previousSameKindPrice = f_lastPriceByKind(_kind)
+    string classification = f_swingShortText(_kind)
+
+    if not na(previousSameKindPrice)
+        if _kind == c_SWING_HIGH
+            classification := _price > previousSameKindPrice ? "HH" : "LH"
+        else
+            classification := _price > previousSameKindPrice ? "HL" : "LL"
+    classification
 
 // An accepted swing must alternate direction and move far enough from the
 // previous accepted one. The first confirmed pivot always initializes memory.
@@ -203,16 +229,16 @@ f_swingStrength(float _price) =>
 
 f_drawSwing(Swing _swing) =>
     if cfg_showSwings
-        string text = f_swingShortText(_swing.kind)
+        string labelText = _swing.state
         if cfg_showStrength
-            text += " " + str.tostring(_swing.strength, "#.0")
+            labelText += " " + str.tostring(_swing.strength, "#.0")
 
         color swingColor = _swing.kind == c_SWING_HIGH ? color.red : color.lime
         labelStyle = _swing.kind == c_SWING_HIGH ? label.style_label_down : label.style_label_up
         label newLabel = label.new(
              _swing.barIndex,
              _swing.price,
-             text,
+             labelText,
              xloc = xloc.bar_index,
              yloc = yloc.price,
              color = swingColor,
@@ -275,7 +301,7 @@ f_renderDashboard() =>
             f_setDashboardCell(0, 5, "Stored swings", labelBackground, color.silver)
             f_setDashboardCell(1, 5, str.tostring(array.size(g_swings)), valueBackground, color.white)
 
-            f_setDashboardCell(0, 6, "Last swing", labelBackground, color.silver)
+            f_setDashboardCell(0, 6, "Last structure", labelBackground, color.silver)
             f_setDashboardCell(1, 6, f_lastSwingText(), valueBackground, color.white)
 
             f_setDashboardCell(0, 7, "Pivot length", labelBackground, color.silver)
@@ -292,28 +318,30 @@ f_renderDashboard() =>
 if sw_newHigh
     float strength = f_swingStrength(sw_pivotHigh)
     if f_isSwingAccepted(c_SWING_HIGH, sw_pivotHigh)
-        Swing newSwing = f_newSwing(c_SWING_HIGH, sw_pivotHigh, bar_index - cfg_pivotLength, time[cfg_pivotLength], strength)
+        string classification = f_classifySwing(c_SWING_HIGH, sw_pivotHigh)
+        Swing newSwing = f_newSwing(c_SWING_HIGH, sw_pivotHigh, bar_index - cfg_pivotLength, time[cfg_pivotLength], strength, classification)
         f_storeSwing(newSwing)
         f_drawSwing(newSwing)
         g_nextSwingId += 1
-        g_lastLog := "Accepted SH: " + str.tostring(sw_pivotHigh, format.mintick)
+        g_lastLog := "Accepted " + classification + ": " + str.tostring(sw_pivotHigh, format.mintick)
     else
         g_lastLog := "Rejected SH: alternation or distance filter"
 
 else if sw_newLow
     float strength = f_swingStrength(sw_pivotLow)
     if f_isSwingAccepted(c_SWING_LOW, sw_pivotLow)
-        Swing newSwing = f_newSwing(c_SWING_LOW, sw_pivotLow, bar_index - cfg_pivotLength, time[cfg_pivotLength], strength)
+        string classification = f_classifySwing(c_SWING_LOW, sw_pivotLow)
+        Swing newSwing = f_newSwing(c_SWING_LOW, sw_pivotLow, bar_index - cfg_pivotLength, time[cfg_pivotLength], strength, classification)
         f_storeSwing(newSwing)
         f_drawSwing(newSwing)
         g_nextSwingId += 1
-        g_lastLog := "Accepted SL: " + str.tostring(sw_pivotLow, format.mintick)
+        g_lastLog := "Accepted " + classification + ": " + str.tostring(sw_pivotLow, format.mintick)
     else
         g_lastLog := "Rejected SL: alternation or distance filter"
 
 f_renderDashboard()
 
 //==============================================================================
-// END OF v0.2.0 SWING ENGINE
-// Next planned increment: v0.3.0 Swing classification (HH, HL, LH, LL).
+// END OF v0.3.0 SWING CLASSIFICATION
+// Next planned increment: v0.4.0 Break of Structure and trend-state logic.
 //==============================================================================

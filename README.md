@@ -3,17 +3,17 @@
 // PARANA PROJECT
 // Institutional Market Intelligence
 //------------------------------------------------------------------------------
-// Version : v1.5.0 Price Action Context
+// Version : v1.7.0 Momentum and RSI Divergence
 // Type    : Indicator
 //
-// This release adds confirmed price-action patterns and measures whether they
-// support the active structure. Markers are optional and no trade instructions
-// are generated.
+// This release exposes confirmed structural, liquidity, and profile events as
+// selectable TradingView alert conditions. Alerts remain informational and do
+// not constitute trade instructions.
 //==============================================================================
 
 indicator(
-     title = "Parana Project v1.5.0 - Price Action Context",
-     shorttitle = "PARANA v1.5",
+     title = "Parana Project v1.7.0 - Momentum",
+     shorttitle = "PARANA v1.7",
      overlay = true,
      max_labels_count = 200,
      max_lines_count = 200,
@@ -25,7 +25,7 @@ indicator(
 //==============================================================================
 
 const string c_PROJECT_NAME = "PARANA PROJECT"
-const string c_VERSION = "v1.5.0 Price Action Context"
+const string c_VERSION = "v1.7.0 Momentum"
 const string c_ENGINE_NAME = "Parana Structure Engine"
 const string c_STATUS_RUNNING = "RUNNING"
 
@@ -35,7 +35,7 @@ const int c_MAX_SWINGS = 200
 const int c_MAX_RENDERED_LABELS = 190
 
 const int c_DASHBOARD_COLUMNS = 6
-const int c_DASHBOARD_ROWS = 7
+const int c_DASHBOARD_ROWS = 8
 
 //==============================================================================
 // 02. USER CONFIGURATION
@@ -51,7 +51,9 @@ string cfg_groupDecision = "07 - Decision Profile"
 string cfg_groupLiquidity = "08 - Liquidity Diagnostics"
 string cfg_groupBosQuality = "09 - BOS Follow-Through"
 string cfg_groupPriceAction = "10 - Price Action"
-string cfg_groupDev = "11 - Development"
+string cfg_groupMomentum = "11 - Momentum and RSI Divergence"
+string cfg_groupAlerts = "12 - Alerts"
+string cfg_groupDev = "13 - Development"
 
 bool cfg_showDashboard = input.bool(
      defval = true,
@@ -234,6 +236,39 @@ int cfg_priceActionWindow = input.int(
      tooltip = "Bars for which the latest confirmed price-action pattern influences the score."
 )
 
+bool cfg_showDivergenceMarkers = input.bool(
+     defval = false,
+     title = "Show RSI divergence markers",
+     group = cfg_groupMomentum,
+     tooltip = "Shows confirmed RSI divergences at their confirmed price pivots. Disabled by default to keep the chart clean."
+)
+
+int cfg_rsiLength = input.int(
+     defval = 14,
+     title = "RSI length",
+     minval = 2,
+     maxval = 100,
+     group = cfg_groupMomentum
+)
+
+int cfg_divergenceWindow = input.int(
+     defval = 20,
+     title = "Divergence validity window (bars)",
+     minval = 1,
+     maxval = 200,
+     group = cfg_groupMomentum,
+     tooltip = "Bars for which the latest confirmed RSI divergence influences momentum context."
+)
+
+int cfg_alertDecisionThreshold = input.int(
+     defval = 80,
+     title = "Decision-score alert threshold",
+     minval = 50,
+     maxval = 100,
+     group = cfg_groupAlerts,
+     tooltip = "Creates a selectable alert when the Decision Score crosses this value upward."
+)
+
 bool cfg_developerMode = input.bool(
      defval = false,
      title = "Developer mode",
@@ -288,6 +323,14 @@ var string g_lastPriceActionEvent = "None"
 var int g_lastPriceActionDirection = 0
 var int g_lastPriceActionBar = na
 var float g_lastPriceActionScore = 50.0
+var float g_previousRsiHighPrice = na
+var float g_previousRsiHighValue = na
+var float g_previousRsiLowPrice = na
+var float g_previousRsiLowValue = na
+var string g_lastMomentumEvent = "NO RECENT DIVERGENCE"
+var int g_lastMomentumDirection = 0
+var int g_lastMomentumBar = na
+var float g_lastMomentumScore = 50.0
 
 var table g_dashboard = table.new(
      position.top_right,
@@ -369,18 +412,20 @@ f_volumeParticipation(float _relativeVolume, float _confirmedClose, float _confi
      supportsBullish or supportsBearish ? "SUPPORTIVE" :
      _relativeVolume < 0.75 ? "WEAK PARTICIPATION" : "NOT CONFIRMING"
 
-// Decision Profile v1.5 weights:
-// Structure 35%, higher-timeframe alignment 25%, volume 15%, liquidity 15%,
-// and confirmed price action 10%.
+// Decision Profile v1.7 weights:
+// Structure 30%, higher-timeframe alignment 22%, volume 13%, liquidity 13%,
+// confirmed price action 8%, and momentum / confirmed RSI divergence 14%.
 // Penalties prevent a visually strong chart from receiving a high profile when
 // participation is weak or higher-timeframe context is conflicted.
-f_decisionScore(float _structureScore, float _htfAlignment, float _volumeScore, float _liquidityScore, float _priceActionScore, float _bosQuality, bool _bosEvaluated) =>
-    float score = _structureScore * 0.35 + _htfAlignment * 0.25 + _volumeScore * 0.15 + _liquidityScore * 0.15 + _priceActionScore * 0.10
+f_decisionScore(float _structureScore, float _htfAlignment, float _volumeScore, float _liquidityScore, float _priceActionScore, float _momentumScore, float _bosQuality, bool _bosEvaluated) =>
+    float score = _structureScore * 0.30 + _htfAlignment * 0.22 + _volumeScore * 0.13 + _liquidityScore * 0.13 + _priceActionScore * 0.08 + _momentumScore * 0.14
     if _volumeScore < 55.0
         score -= 10.0
     if _htfAlignment < 66.0
         score -= 10.0
     if _liquidityScore < 45.0
+        score -= 10.0
+    if _momentumScore < 40.0
         score -= 10.0
     if _bosEvaluated and _bosQuality < 50.0
         score -= 10.0
@@ -392,11 +437,12 @@ f_decisionClass(float _score) =>
 f_decisionContext(float _score) =>
     _score >= 85.0 ? "HIGH CONFLUENCE" : _score >= 70.0 ? "CONDITIONAL CONTEXT" : _score >= 60.0 ? "MIXED CONTEXT" : "WAIT FOR CLARITY"
 
-f_primaryCaution(float _structureScore, float _htfAlignment, float _volumeScore, float _liquidityScore, float _priceActionScore, float _bosQuality, bool _bosEvaluated) =>
+f_primaryCaution(float _structureScore, float _htfAlignment, float _volumeScore, float _liquidityScore, float _priceActionScore, float _momentumScore, float _bosQuality, bool _bosEvaluated) =>
     _bosEvaluated and _bosQuality < 50.0 ? "BOS lacks follow-through" :
      _volumeScore < 55.0 ? "Low volume participation" :
      _htfAlignment < 66.0 ? "Higher-timeframe conflict" :
      _liquidityScore < 45.0 ? "Adverse liquidity event" :
+     _momentumScore < 40.0 ? "Momentum contradicts trend" :
      _priceActionScore < 40.0 ? "Price action contradicts trend" :
      _structureScore < 70.0 ? "Structure needs confirmation" : "No critical caution"
 
@@ -708,6 +754,11 @@ float vol_relativeConfirmed = barstate.isconfirmed ? vol_relativeRaw : vol_relat
 float vol_confirmedClose = barstate.isconfirmed ? close : close[1]
 float vol_confirmedOpen = barstate.isconfirmed ? open : open[1]
 
+// Momentum uses RSI values at the original pivot bar. As a pivot is only
+// available cfg_pivotLength bars later, divergence labels are confirmed and do
+// not repaint after they appear.
+float mom_rsi = ta.rsi(close, cfg_rsiLength)
+
 // Calculated on every bar so BOS quality remains consistent across history and
 // realtime execution. The event bar itself is excluded once the window ends.
 float bos_atr = ta.atr(cfg_bosAtrLength)
@@ -760,6 +811,39 @@ f_priceActionState(float _score) =>
     na(patternAge) or patternAge > cfg_priceActionWindow ? "NO RECENT PATTERN" :
      _score >= 70.0 ? "SUPPORTIVE" :
      _score >= 50.0 ? "NEUTRAL" : "CONTRARY"
+
+f_momentumAge() =>
+    na(g_lastMomentumBar) ? na : bar_index - g_lastMomentumBar
+
+f_momentumScore() =>
+    int divergenceAge = f_momentumAge()
+    not na(divergenceAge) and divergenceAge <= cfg_divergenceWindow ? g_lastMomentumScore : 50.0
+
+f_momentumState(float _score) =>
+    int divergenceAge = f_momentumAge()
+    na(divergenceAge) or divergenceAge > cfg_divergenceWindow ? "NEUTRAL" :
+     _score >= 70.0 ? "SUPPORTIVE" :
+     _score <= 35.0 ? "CONTRARY" : "NEUTRAL"
+
+f_drawDivergence(bool _isBullish, float _price) =>
+    if cfg_showDivergenceMarkers
+        string divergenceText = _isBullish ? "RSI BULL DIV" : "RSI BEAR DIV"
+        color divergenceColor = _isBullish ? color.teal : color.maroon
+        labelStyle = _isBullish ? label.style_label_up : label.style_label_down
+        label newLabel = label.new(
+             bar_index - cfg_pivotLength,
+             _price,
+             divergenceText,
+             xloc = xloc.bar_index,
+             yloc = yloc.price,
+             color = divergenceColor,
+             style = labelStyle,
+             textcolor = color.white,
+             size = size.tiny
+        )
+        if array.size(g_swingLabels) >= c_MAX_RENDERED_LABELS
+            label.delete(array.shift(g_swingLabels))
+        array.push(g_swingLabels, newLabel)
 
 f_drawPriceAction(int _direction, string _pattern) =>
     if cfg_showPriceActionMarkers
@@ -896,7 +980,8 @@ f_renderDashboard() =>
                 bool decisionBosEvaluated = f_bosIsEvaluated()
                 float decisionBosQuality = f_bosQuality()
                 float decisionPriceActionScore = f_priceActionScore()
-                float decisionScore = f_decisionScore(decisionStructureScore, htfAlignment, decisionVolumeScore, decisionLiquidityScore, decisionPriceActionScore, decisionBosQuality, decisionBosEvaluated)
+                float decisionMomentumScore = f_momentumScore()
+                float decisionScore = f_decisionScore(decisionStructureScore, htfAlignment, decisionVolumeScore, decisionLiquidityScore, decisionPriceActionScore, decisionMomentumScore, decisionBosQuality, decisionBosEvaluated)
 
                 f_setDashboardCell(0, 25, "Decision score", labelBackground, color.silver)
                 f_setDashboardCell(1, 25, str.tostring(decisionScore, "#.0") + " / 100", valueBackground, color.white)
@@ -920,7 +1005,7 @@ f_renderDashboard() =>
                 f_setDashboardCell(1, 31, str.tostring(decisionLiquidityScore * 0.15, "#.0") + " / 15", valueBackground, color.white)
 
                 f_setDashboardCell(0, 32, "Caution", labelBackground, color.silver)
-                f_setDashboardCell(1, 32, f_primaryCaution(decisionStructureScore, htfAlignment, decisionVolumeScore, decisionLiquidityScore, decisionPriceActionScore, decisionBosQuality, decisionBosEvaluated), valueBackground, color.white)
+                f_setDashboardCell(1, 32, f_primaryCaution(decisionStructureScore, htfAlignment, decisionVolumeScore, decisionLiquidityScore, decisionPriceActionScore, decisionMomentumScore, decisionBosQuality, decisionBosEvaluated), valueBackground, color.white)
 
             if cfg_showLiquidity
                 float liquidityScore = f_liquidityScore()
@@ -967,11 +1052,13 @@ f_renderCompactDashboard() =>
             float bosQuality = f_bosQuality()
             float priceActionScore = f_priceActionScore()
             int priceActionAge = f_priceActionAge()
+            float momentumScore = f_momentumScore()
+            int momentumAge = f_momentumAge()
             float htfAlignment = f_htfAlignment(f_localDirection(), mtf_directionOne, mtf_directionTwo, mtf_directionThree)
-            float decisionScore = f_decisionScore(structureScore, htfAlignment, volumeScore, liquidityScore, priceActionScore, bosQuality, bosEvaluated)
+            float decisionScore = f_decisionScore(structureScore, htfAlignment, volumeScore, liquidityScore, priceActionScore, momentumScore, bosQuality, bosEvaluated)
 
             f_setDashboardCell(0, 0, c_PROJECT_NAME, headerBackground, color.white)
-            f_setDashboardCell(1, 0, "v1.5", headerBackground, color.white)
+            f_setDashboardCell(1, 0, "v1.6", headerBackground, color.white)
             f_setDashboardCell(2, 0, syminfo.ticker, headerBackground, color.white)
             f_setDashboardCell(3, 0, timeframe.period, headerBackground, color.white)
             f_setDashboardCell(4, 0, "Decision", headerBackground, color.white)
@@ -1006,7 +1093,7 @@ f_renderCompactDashboard() =>
             f_setDashboardCell(5, 4, str.tostring(priceActionScore, "#.0") + " " + f_priceActionState(priceActionScore), valueBackground, color.white)
 
             f_setDashboardCell(0, 5, "Caution", labelBackground, color.silver)
-            f_setDashboardCell(1, 5, f_primaryCaution(structureScore, htfAlignment, volumeScore, liquidityScore, priceActionScore, bosQuality, bosEvaluated), valueBackground, color.white)
+            f_setDashboardCell(1, 5, f_primaryCaution(structureScore, htfAlignment, volumeScore, liquidityScore, priceActionScore, momentumScore, bosQuality, bosEvaluated), valueBackground, color.white)
             f_setDashboardCell(2, 5, "Last event", labelBackground, color.silver)
             f_setDashboardCell(3, 5, g_lastStructureEvent, valueBackground, color.white)
             f_setDashboardCell(4, 5, "Last liquidity", labelBackground, color.silver)
@@ -1018,6 +1105,13 @@ f_renderCompactDashboard() =>
             f_setDashboardCell(3, 6, g_lastPriceActionEvent, valueBackground, color.white)
             f_setDashboardCell(4, 6, "Pattern age", labelBackground, color.silver)
             f_setDashboardCell(5, 6, na(priceActionAge) ? "N/A" : str.tostring(priceActionAge) + " bars", valueBackground, color.white)
+
+            f_setDashboardCell(0, 7, "Momentum", labelBackground, color.silver)
+            f_setDashboardCell(1, 7, str.tostring(momentumScore, "#.0") + " " + f_momentumState(momentumScore), valueBackground, color.white)
+            f_setDashboardCell(2, 7, "RSI " + str.tostring(cfg_rsiLength), labelBackground, color.silver)
+            f_setDashboardCell(3, 7, str.tostring(mom_rsi, "#.0"), valueBackground, color.white)
+            f_setDashboardCell(4, 7, "Last divergence", labelBackground, color.silver)
+            f_setDashboardCell(5, 7, g_lastMomentumEvent + (na(momentumAge) ? "" : " " + str.tostring(momentumAge) + " bars"), valueBackground, color.white)
 
 //==============================================================================
 // 08. MAIN LOOP
@@ -1031,6 +1125,18 @@ if sw_newHigh
         Swing newSwing = f_newSwing(c_SWING_HIGH, sw_pivotHigh, bar_index - cfg_pivotLength, time[cfg_pivotLength], strength, classification)
         f_storeSwing(newSwing)
         f_drawSwing(newSwing)
+        float rsiAtHighPivot = mom_rsi[cfg_pivotLength]
+        bool bearishDivergence = not na(g_previousRsiHighPrice) and not na(g_previousRsiHighValue) and sw_pivotHigh > g_previousRsiHighPrice and rsiAtHighPivot < g_previousRsiHighValue
+        if bearishDivergence
+            bool supportsTrend = g_trendState == "BEARISH"
+            g_lastMomentumEvent := "RSI BEAR DIV"
+            g_lastMomentumDirection := -1
+            g_lastMomentumBar := bar_index
+            g_lastMomentumScore := supportsTrend ? 85.0 : g_trendState == "BULLISH" ? 25.0 : 50.0
+            g_lastLog := g_lastMomentumEvent + (supportsTrend ? " supports structure" : " contradicts structure")
+            f_drawDivergence(false, sw_pivotHigh)
+        g_previousRsiHighPrice := sw_pivotHigh
+        g_previousRsiHighValue := rsiAtHighPivot
         if isEqualHigh
             g_equalHighCount += 1
             g_lastLiquidityEvent := "EQH @ " + str.tostring(sw_pivotHigh, format.mintick)
@@ -1049,6 +1155,18 @@ else if sw_newLow
         Swing newSwing = f_newSwing(c_SWING_LOW, sw_pivotLow, bar_index - cfg_pivotLength, time[cfg_pivotLength], strength, classification)
         f_storeSwing(newSwing)
         f_drawSwing(newSwing)
+        float rsiAtLowPivot = mom_rsi[cfg_pivotLength]
+        bool bullishDivergence = not na(g_previousRsiLowPrice) and not na(g_previousRsiLowValue) and sw_pivotLow < g_previousRsiLowPrice and rsiAtLowPivot > g_previousRsiLowValue
+        if bullishDivergence
+            bool supportsTrend = g_trendState == "BULLISH"
+            g_lastMomentumEvent := "RSI BULL DIV"
+            g_lastMomentumDirection := 1
+            g_lastMomentumBar := bar_index
+            g_lastMomentumScore := supportsTrend ? 85.0 : g_trendState == "BEARISH" ? 25.0 : 50.0
+            g_lastLog := g_lastMomentumEvent + (supportsTrend ? " supports structure" : " contradicts structure")
+            f_drawDivergence(true, sw_pivotLow)
+        g_previousRsiLowPrice := sw_pivotLow
+        g_previousRsiLowValue := rsiAtLowPivot
         if isEqualLow
             g_equalLowCount += 1
             g_lastLiquidityEvent := "EQL @ " + str.tostring(sw_pivotLow, format.mintick)
@@ -1160,9 +1278,41 @@ if barstate.isconfirmed
         g_lastLog := priceActionEvent + (supportsStructure ? " supports structure" : " contradicts structure")
         f_drawPriceAction(priceActionDirection, priceActionEvent)
 
+//==============================================================================
+// 09. ALERT CONDITIONS
+//==============================================================================
+
+// Conditions are evaluated after all state updates on the bar. BOS and sweep
+// variables already require barstate.isconfirmed, so alerts only trigger from
+// closed-bar events.
+bool alertBullishChoch = str_bullBreak and g_trendState[1] == "BEARISH"
+bool alertBearishChoch = str_bearBreak and g_trendState[1] == "BULLISH"
+
+float alertStructureScore = f_structureScore()
+float alertVolumeScore = f_volumeScore(vol_relativeConfirmed)
+float alertLiquidityScore = f_liquidityScore()
+float alertPriceActionScore = f_priceActionScore()
+float alertMomentumScore = f_momentumScore()
+bool alertBosEvaluated = f_bosIsEvaluated()
+float alertBosQuality = f_bosQuality()
+float alertHtfAlignment = f_htfAlignment(f_localDirection(), mtf_directionOne, mtf_directionTwo, mtf_directionThree)
+float alertDecisionScore = f_decisionScore(alertStructureScore, alertHtfAlignment, alertVolumeScore, alertLiquidityScore, alertPriceActionScore, alertMomentumScore, alertBosQuality, alertBosEvaluated)
+
+bool alertDecisionThresholdCross = alertDecisionScore >= cfg_alertDecisionThreshold and alertDecisionScore[1] < cfg_alertDecisionThreshold
+bool alertBosFailure = alertBosEvaluated and not alertBosEvaluated[1] and alertBosQuality < 50.0
+
+alertcondition(str_bullBreak and not alertBullishChoch, "Parana BOS UP", "Parana Project: confirmed BOS UP on {{ticker}} {{interval}}.")
+alertcondition(str_bearBreak and not alertBearishChoch, "Parana BOS DOWN", "Parana Project: confirmed BOS DOWN on {{ticker}} {{interval}}.")
+alertcondition(alertBullishChoch, "Parana CHoCH UP", "Parana Project: confirmed CHoCH UP on {{ticker}} {{interval}}.")
+alertcondition(alertBearishChoch, "Parana CHoCH DOWN", "Parana Project: confirmed CHoCH DOWN on {{ticker}} {{interval}}.")
+alertcondition(liq_highSweep, "Parana Sweep High", "Parana Project: confirmed high-liquidity sweep on {{ticker}} {{interval}}.")
+alertcondition(liq_lowSweep, "Parana Sweep Low", "Parana Project: confirmed low-liquidity sweep on {{ticker}} {{interval}}.")
+alertcondition(alertDecisionThresholdCross, "Parana Decision Score Threshold", "Parana Project: Decision Score crossed the configured threshold on {{ticker}} {{interval}}.")
+alertcondition(alertBosFailure, "Parana BOS Follow-Through Failed", "Parana Project: BOS follow-through failed on {{ticker}} {{interval}}.")
+
 f_renderCompactDashboard()
 
 //==============================================================================
-// END OF v1.5.0 PRICE ACTION CONTEXT
-// Next planned increment: v1.6.0 Alert conditions and validation workflow.
+// END OF v1.7.0 MOMENTUM AND RSI DIVERGENCE
+// Next planned increment: conservative Wyckoff candidate engine.
 //==============================================================================

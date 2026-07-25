@@ -3,17 +3,17 @@
 // PARANA PROJECT
 // Institutional Market Intelligence
 //------------------------------------------------------------------------------
-// Version : v0.4.0 Structure Breaks
+// Version : v0.5.0 CHoCH
 // Type    : Indicator
 //
-// This release detects confirmed close-based breaks of the latest swing high
-// or low. It shows BOS upward/downward events and the resulting trend state.
-// It does not issue trade signals or CHoCH events.
+// This release distinguishes a continuation break (BOS) from a break against
+// the active trend (CHoCH). Events are still diagnostic; no trade signals are
+// generated.
 //==============================================================================
 
 indicator(
-     title = "Parana Project v0.4.0 - Structure Breaks",
-     shorttitle = "PARANA v0.4",
+     title = "Parana Project v0.5.0 - CHoCH",
+     shorttitle = "PARANA v0.5",
      overlay = true,
      max_labels_count = 200,
      max_lines_count = 200,
@@ -25,7 +25,7 @@ indicator(
 //==============================================================================
 
 const string c_PROJECT_NAME = "PARANA PROJECT"
-const string c_VERSION = "v0.4.0 Structure Breaks"
+const string c_VERSION = "v0.5.0 CHoCH"
 const string c_ENGINE_NAME = "Parana Structure Engine"
 const string c_STATUS_RUNNING = "RUNNING"
 
@@ -87,9 +87,9 @@ bool cfg_showStrength = input.bool(
 
 bool cfg_showStructureBreaks = input.bool(
      defval = true,
-     title = "Show confirmed structure breaks",
+     title = "Show confirmed structure events",
      group = cfg_groupStructure,
-     tooltip = "Shows BOS only after a candle closes beyond the latest confirmed swing level."
+     tooltip = "Shows BOS and CHoCH only after a candle closes beyond the latest confirmed swing level."
 )
 
 bool cfg_developerMode = input.bool(
@@ -274,15 +274,15 @@ f_drawSwing(Swing _swing) =>
             label.delete(array.shift(g_swingLabels))
         array.push(g_swingLabels, newLabel)
 
-f_drawStructureBreak(bool _isBullish, float _level) =>
+f_drawStructureBreak(bool _isBullish, float _level, string _eventText) =>
     if cfg_showStructureBreaks
-        string breakText = _isBullish ? "BOS UP" : "BOS DOWN"
-        color breakColor = _isBullish ? color.aqua : color.orange
+        bool isChoch = str.contains(_eventText, "CHoCH")
+        color breakColor = isChoch ? color.fuchsia : _isBullish ? color.aqua : color.orange
         labelStyle = _isBullish ? label.style_label_up : label.style_label_down
         label newLabel = label.new(
              bar_index,
              _level,
-             breakText,
+             _eventText,
              xloc = xloc.bar_index,
              yloc = yloc.price,
              color = breakColor,
@@ -399,22 +399,26 @@ bool str_bullBreak = barstate.isconfirmed and not na(str_lastHighPrice) and str_
 bool str_bearBreak = barstate.isconfirmed and not na(str_lastLowPrice) and str_crossedBelowLastLow and (na(g_lastBearBreakSwingId) or str_lastLowId != g_lastBearBreakSwingId)
 
 if str_bullBreak
+    bool isChoch = g_trendState == "BEARISH"
+    string eventText = isChoch ? "CHoCH UP" : "BOS UP"
     g_trendState := "BULLISH"
     g_lastBullBreakSwingId := str_lastHighId
-    g_lastStructureEvent := "BOS UP @ " + str.tostring(str_lastHighPrice, format.mintick)
+    g_lastStructureEvent := eventText + " @ " + str.tostring(str_lastHighPrice, format.mintick)
     g_lastLog := g_lastStructureEvent
-    f_drawStructureBreak(true, str_lastHighPrice)
+    f_drawStructureBreak(true, str_lastHighPrice, eventText)
 
 else if str_bearBreak
+    bool isChoch = g_trendState == "BULLISH"
+    string eventText = isChoch ? "CHoCH DOWN" : "BOS DOWN"
     g_trendState := "BEARISH"
     g_lastBearBreakSwingId := str_lastLowId
-    g_lastStructureEvent := "BOS DOWN @ " + str.tostring(str_lastLowPrice, format.mintick)
+    g_lastStructureEvent := eventText + " @ " + str.tostring(str_lastLowPrice, format.mintick)
     g_lastLog := g_lastStructureEvent
-    f_drawStructureBreak(false, str_lastLowPrice)
+    f_drawStructureBreak(false, str_lastLowPrice, eventText)
 
 f_renderDashboard()
 
 //==============================================================================
-// END OF v0.4.0 STRUCTURE BREAKS
-// Next planned increment: v0.5.0 CHoCH and Market Structure Shift logic.
+// END OF v0.5.0 CHoCH
+// Next planned increment: v0.6.0 Structure score and multi-timeframe context.
 //==============================================================================

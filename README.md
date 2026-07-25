@@ -3,17 +3,17 @@
 // PARANA PROJECT
 // Institutional Market Intelligence
 //------------------------------------------------------------------------------
-// Version : v0.7.0 Higher-Timeframe Context
+// Version : v0.8.0 Trade Horizon
 // Type    : Indicator
 //
-// This release adds confirmed higher-timeframe structure context. The local
-// structure score remains independent; HTF alignment is presented separately
-// so an intraday setup is not confused with a swing or positional setup.
+// This release translates timeframe and confirmed HTF alignment into an
+// operational horizon. It remains a diagnostic tool and never emits entries,
+// exits, or buy/sell advice.
 //==============================================================================
 
 indicator(
-     title = "Parana Project v0.7.0 - HTF Context",
-     shorttitle = "PARANA v0.7",
+     title = "Parana Project v0.8.0 - Trade Horizon",
+     shorttitle = "PARANA v0.8",
      overlay = true,
      max_labels_count = 200,
      max_lines_count = 200,
@@ -25,7 +25,7 @@ indicator(
 //==============================================================================
 
 const string c_PROJECT_NAME = "PARANA PROJECT"
-const string c_VERSION = "v0.7.0 HTF Context"
+const string c_VERSION = "v0.8.0 Trade Horizon"
 const string c_ENGINE_NAME = "Parana Structure Engine"
 const string c_STATUS_RUNNING = "RUNNING"
 
@@ -35,7 +35,7 @@ const int c_MAX_SWINGS = 200
 const int c_MAX_RENDERED_LABELS = 190
 
 const int c_DASHBOARD_COLUMNS = 2
-const int c_DASHBOARD_ROWS = 17
+const int c_DASHBOARD_ROWS = 21
 
 //==============================================================================
 // 02. USER CONFIGURATION
@@ -45,7 +45,8 @@ string cfg_groupGeneral = "01 - General"
 string cfg_groupSwing = "02 - Swing Engine"
 string cfg_groupStructure = "03 - Structure Breaks"
 string cfg_groupMtf = "04 - Higher-Timeframe Context"
-string cfg_groupDev = "05 - Development"
+string cfg_groupHorizon = "05 - Trade Horizon"
+string cfg_groupDev = "06 - Development"
 
 bool cfg_showDashboard = input.bool(
      defval = true,
@@ -119,6 +120,13 @@ string cfg_htfThree = input.timeframe(
      title = "Context timeframe 3",
      group = cfg_groupMtf,
      tooltip = "Common setting for the daily higher-timeframe market context."
+)
+
+bool cfg_showTradeHorizon = input.bool(
+     defval = true,
+     title = "Show trade horizon",
+     group = cfg_groupHorizon,
+     tooltip = "Classifies the natural management horizon from the chart timeframe and HTF alignment."
 )
 
 bool cfg_developerMode = input.bool(
@@ -204,8 +212,27 @@ f_localDirection() =>
 f_contextLabel(float _alignment) =>
     _alignment >= 100.0 ? "FULLY ALIGNED" : _alignment >= 66.0 ? "PARTIALLY ALIGNED" : _alignment > 0.0 ? "CONFLICTED" : "NO HTF BIAS"
 
+f_tradeHorizon() =>
+    float chartSeconds = timeframe.in_seconds()
+    chartSeconds <= 300.0 ? "SCALPING" : chartSeconds <= 3600.0 ? "INTRADAY" : chartSeconds <= 86400.0 ? "SWING" : "POSITIONAL"
+
+f_expectedDuration() =>
+    float chartSeconds = timeframe.in_seconds()
+    chartSeconds <= 300.0 ? "5-30 minutes" :
+     chartSeconds <= 3600.0 ? "1-8 hours" :
+     chartSeconds <= 14400.0 ? "2-7 days" :
+     chartSeconds <= 86400.0 ? "1-6 weeks" : "Weeks to months"
+
+f_horizonSupport(float _alignment) =>
+    _alignment >= 100.0 ? "HTF SUPPORTIVE" : _alignment >= 66.0 ? "HTF PARTIAL" : _alignment > 0.0 ? "HTF CONFLICT" : "HTF NEUTRAL"
+
+f_managementGuidance(float _alignment) =>
+    _alignment >= 100.0 ? "Manage within stated horizon" :
+     _alignment >= 66.0 ? "Use conservative duration" :
+     _alignment > 0.0 ? "Do not extend the setup" : "Wait for HTF context"
+
 // This compact, stateful structure model runs inside request.security(). It is
-// intentionally display-only in v0.7.0; the full local PSE remains the source
+// intentionally display-only in v0.8.0; the full local PSE remains the source
 // of the local score and visual structure events.
 f_htfDirection(int _pivotLength) =>
     var float lastHigh = na
@@ -451,6 +478,8 @@ f_renderDashboard() =>
             color headerBackground = color.rgb(23, 35, 52)
             color labelBackground = color.new(color.rgb(23, 35, 52), 45)
             color valueBackground = color.new(color.black, 15)
+            int localDirection = f_localDirection()
+            float htfAlignment = f_htfAlignment(localDirection, mtf_directionOne, mtf_directionTwo, mtf_directionThree)
 
             f_setDashboardCell(0, 0, c_PROJECT_NAME, headerBackground, color.white)
             f_setDashboardCell(1, 0, c_VERSION, headerBackground, color.white)
@@ -491,9 +520,6 @@ f_renderDashboard() =>
             f_setDashboardCell(1, 11, cfg_developerMode ? logText : g_lastStructureEvent, valueBackground, color.white)
 
             if cfg_showHtfContext
-                int localDirection = f_localDirection()
-                float htfAlignment = f_htfAlignment(localDirection, mtf_directionOne, mtf_directionTwo, mtf_directionThree)
-
                 f_setDashboardCell(0, 12, "HTF " + cfg_htfOne, labelBackground, color.silver)
                 f_setDashboardCell(1, 12, f_directionText(mtf_directionOne), valueBackground, color.white)
 
@@ -508,6 +534,19 @@ f_renderDashboard() =>
 
                 f_setDashboardCell(0, 16, "Context", labelBackground, color.silver)
                 f_setDashboardCell(1, 16, f_contextLabel(htfAlignment), valueBackground, color.white)
+
+            if cfg_showTradeHorizon
+                f_setDashboardCell(0, 17, "Trade horizon", labelBackground, color.silver)
+                f_setDashboardCell(1, 17, f_tradeHorizon(), valueBackground, color.white)
+
+                f_setDashboardCell(0, 18, "Expected duration", labelBackground, color.silver)
+                f_setDashboardCell(1, 18, f_expectedDuration(), valueBackground, color.white)
+
+                f_setDashboardCell(0, 19, "HTF support", labelBackground, color.silver)
+                f_setDashboardCell(1, 19, f_horizonSupport(htfAlignment), valueBackground, color.white)
+
+                f_setDashboardCell(0, 20, "Management", labelBackground, color.silver)
+                f_setDashboardCell(1, 20, f_managementGuidance(htfAlignment), valueBackground, color.white)
 
 //==============================================================================
 // 08. MAIN LOOP
@@ -570,6 +609,6 @@ else if str_bearBreak
 f_renderDashboard()
 
 //==============================================================================
-// END OF v0.7.0 HIGHER-TIMEFRAME CONTEXT
-// Next planned increment: v0.8.0 Trade Horizon classification.
+// END OF v0.8.0 TRADE HORIZON
+// Next planned increment: v0.9.0 Relative volume and participation context.
 //==============================================================================

@@ -1,185 +1,191 @@
 //@version=6
 //==============================================================================
-// PARANA PROJECT STRATEGY
+// PARANA PROJECT - DIRECTION AUDIT
 //------------------------------------------------------------------------------
-// Version : v0.2.0 Quality Filters
-// Purpose : Compare the baseline structure-break strategy with a more selective
-//           version. This is research code, not investment advice.
+// Version : v0.1.0
+// Purpose : Validate the directional-reading layer before using it as an
+//           ingredient in a trading strategy.
 //
-// Entry thesis
-// 1. Confirmed close breaks the latest confirmed swing high/low.
-// 2. Trend regime, directional strength, breakout candle and participation
-//    filters agree with that direction.
+// A directional call requires agreement between:
+// - confirmed local swing structure,
+// - local EMA regime,
+// - two confirmed higher-timeframe regimes,
+// - optional relative-volume participation.
 //
-// Testing discipline
-// - Change one filter at a time and record its effect.
-// - Keep a part of history untouched for out-of-sample validation.
-// - Do not select settings solely because they improve one BTC chart.
+// The script does NOT place orders. After a fixed number of chart bars it
+// records whether each fresh bullish/bearish call was directionally correct.
 //==============================================================================
 
-strategy(
-     title = "Parana Project Strategy v0.2.0 - Quality Filters",
-     shorttitle = "PARANA STRAT v0.2",
+indicator(
+     title = "Parana Project Direction Audit v0.1.0",
+     shorttitle = "PARANA DIRECTION v0.1",
      overlay = true,
-     pyramiding = 0,
-     initial_capital = 10000,
-     default_qty_type = strategy.percent_of_equity,
-     default_qty_value = 10,
-     commission_type = strategy.commission.percent,
-     commission_value = 0.10,
-     process_orders_on_close = false,
-     calc_on_order_fills = false
+     max_labels_count = 500
 )
 
 //==============================================================================
 // 01. INPUTS
 //==============================================================================
 
-string cfg_groupEntry = "01 - Structure Entry"
-string cfg_groupQuality = "02 - Quality Filters"
-string cfg_groupRisk = "03 - Risk Model"
-string cfg_groupTest = "04 - Test Controls"
+string cfg_groupLocal = "01 - Local Direction"
+string cfg_groupHtf = "02 - Higher Timeframes"
+string cfg_groupAudit = "03 - Audit"
+string cfg_groupVisual = "04 - Visuals"
 
-int cfg_pivotLength = input.int(5, "Pivot sensitivity", minval = 2, maxval = 50, group = cfg_groupEntry)
-int cfg_fastEmaLength = input.int(50, "Fast trend EMA", minval = 5, maxval = 500, group = cfg_groupEntry)
-int cfg_slowEmaLength = input.int(200, "Slow regime EMA", minval = 20, maxval = 500, group = cfg_groupEntry)
-string cfg_direction = input.string("Both", "Trade direction", options = ["Long", "Short", "Both"], group = cfg_groupEntry)
+int cfg_pivotLength = input.int(5, "Pivot sensitivity", minval = 2, maxval = 50, group = cfg_groupLocal)
+int cfg_fastEmaLength = input.int(50, "Fast EMA", minval = 5, maxval = 500, group = cfg_groupLocal)
+int cfg_slowEmaLength = input.int(200, "Slow EMA", minval = 20, maxval = 500, group = cfg_groupLocal)
+int cfg_volumeLength = input.int(20, "Relative volume lookback", minval = 5, maxval = 200, group = cfg_groupLocal)
+float cfg_minRelativeVolume = input.float(1.0, "Minimum relative volume", minval = 0.1, step = 0.05, group = cfg_groupLocal)
+bool cfg_useVolume = input.bool(true, "Use volume as confluence", group = cfg_groupLocal)
 
-bool cfg_useTrendFilter = input.bool(true, "Require trend regime", group = cfg_groupQuality, tooltip = "Long: price and EMA 50 above EMA 200. Short: inverse.")
-int cfg_slopeLookback = input.int(10, "EMA slope lookback", minval = 1, maxval = 100, group = cfg_groupQuality)
-bool cfg_useAdxFilter = input.bool(true, "Require directional strength (ADX)", group = cfg_groupQuality)
-int cfg_diLength = input.int(14, "DI length", minval = 2, maxval = 100, group = cfg_groupQuality)
-int cfg_adxSmoothing = input.int(14, "ADX smoothing", minval = 2, maxval = 100, group = cfg_groupQuality)
-float cfg_minAdx = input.float(20.0, "Minimum ADX", minval = 1.0, step = 0.5, group = cfg_groupQuality)
-bool cfg_useVolumeFilter = input.bool(true, "Require relative volume", group = cfg_groupQuality)
-int cfg_volumeLength = input.int(20, "Relative volume lookback", minval = 5, maxval = 200, group = cfg_groupQuality)
-float cfg_minRelativeVolume = input.float(1.20, "Minimum relative volume", minval = 0.1, step = 0.05, group = cfg_groupQuality)
-bool cfg_useBreakoutCandleFilter = input.bool(true, "Require quality breakout candle", group = cfg_groupQuality)
-float cfg_minBodyAtr = input.float(0.40, "Minimum candle body (ATR)", minval = 0.05, step = 0.05, group = cfg_groupQuality)
-float cfg_closeStrength = input.float(0.65, "Close strength (0-1)", minval = 0.50, maxval = 0.95, step = 0.05, group = cfg_groupQuality, tooltip = "Longs must close in the upper portion of the range; shorts in the lower portion.")
-int cfg_cooldownBars = input.int(6, "Cooldown after an exit (bars)", minval = 0, maxval = 500, group = cfg_groupQuality)
+string cfg_htf1 = input.timeframe("D", "Higher timeframe 1", group = cfg_groupHtf, tooltip = "Recommended for a 4H chart: D.")
+string cfg_htf2 = input.timeframe("W", "Higher timeframe 2", group = cfg_groupHtf, tooltip = "Recommended for a 4H chart: W.")
+int cfg_htfEmaLength = input.int(50, "Higher-timeframe EMA", minval = 5, maxval = 500, group = cfg_groupHtf)
+int cfg_minDirectionScore = input.int(70, "Minimum direction score", minval = 40, maxval = 100, group = cfg_groupHtf)
 
-int cfg_atrLength = input.int(14, "ATR length", minval = 2, maxval = 100, group = cfg_groupRisk)
-float cfg_stopAtr = input.float(1.5, "Stop loss (ATR)", minval = 0.1, step = 0.1, group = cfg_groupRisk)
-float cfg_rewardRisk = input.float(2.0, "Reward / risk", minval = 0.25, step = 0.25, group = cfg_groupRisk)
-int cfg_maxHoldingBars = input.int(42, "Maximum holding bars", minval = 1, maxval = 1000, group = cfg_groupRisk, tooltip = "On a 4H chart, 42 bars are approximately seven days.")
+int cfg_evaluationBars = input.int(12, "Evaluation horizon (chart bars)", minval = 1, maxval = 500, group = cfg_groupAudit, tooltip = "On a 4H chart, 12 bars equal approximately two days.")
+int cfg_minSamples = input.int(20, "Minimum calls before judging", minval = 5, maxval = 500, group = cfg_groupAudit)
 
-bool cfg_showLevels = input.bool(true, "Show active stop and target", group = cfg_groupTest)
-bool cfg_showSetups = input.bool(true, "Show accepted setups", group = cfg_groupTest)
+bool cfg_showCalls = input.bool(true, "Show fresh directional calls", group = cfg_groupVisual)
+bool cfg_showDashboard = input.bool(true, "Show direction dashboard", group = cfg_groupVisual)
+bool cfg_showEma = input.bool(true, "Show local EMAs", group = cfg_groupVisual)
 
 //==============================================================================
-// 02. MARKET DATA AND CONFIRMED SWINGS
+// 02. CONFIRMED LOCAL STRUCTURE
 //==============================================================================
-
-float fastEma = ta.ema(close, cfg_fastEmaLength)
-float slowEma = ta.ema(close, cfg_slowEmaLength)
-float atr = ta.atr(cfg_atrLength)
-float volumeAverage = ta.sma(volume, cfg_volumeLength)
-float relativeVolume = not na(volumeAverage) and volumeAverage > 0.0 ? volume / volumeAverage : na
-[plusDi, minusDi, adx] = ta.dmi(cfg_diLength, cfg_adxSmoothing)
 
 float pivotHigh = ta.pivothigh(high, cfg_pivotLength, cfg_pivotLength)
 float pivotLow = ta.pivotlow(low, cfg_pivotLength, cfg_pivotLength)
 
-var float lastSwingHigh = na
-var float lastSwingLow = na
+var float g_lastSwingHigh = na
+var float g_previousSwingHigh = na
+var float g_lastSwingLow = na
+var float g_previousSwingLow = na
 
 if not na(pivotHigh)
-    lastSwingHigh := pivotHigh
+    g_previousSwingHigh := g_lastSwingHigh
+    g_lastSwingHigh := pivotHigh
+
 if not na(pivotLow)
-    lastSwingLow := pivotLow
+    g_previousSwingLow := g_lastSwingLow
+    g_lastSwingLow := pivotLow
+
+bool structureBull = not na(g_previousSwingHigh) and not na(g_previousSwingLow) and g_lastSwingHigh > g_previousSwingHigh and g_lastSwingLow > g_previousSwingLow
+bool structureBear = not na(g_previousSwingHigh) and not na(g_previousSwingLow) and g_lastSwingHigh < g_previousSwingHigh and g_lastSwingLow < g_previousSwingLow
+
+float fastEma = ta.ema(close, cfg_fastEmaLength)
+float slowEma = ta.ema(close, cfg_slowEmaLength)
+bool emaBull = close > fastEma and fastEma > slowEma
+bool emaBear = close < fastEma and fastEma < slowEma
+
+float volumeAverage = ta.sma(volume, cfg_volumeLength)
+float relativeVolume = not na(volumeAverage) and volumeAverage > 0.0 ? volume / volumeAverage : na
+bool volumePass = not cfg_useVolume or (not na(relativeVolume) and relativeVolume >= cfg_minRelativeVolume)
 
 //==============================================================================
-// 03. QUALITY FILTERS
+// 03. CONFIRMED HIGHER-TIMEFRAME DIRECTION
+// The [1] expression uses only completed higher-timeframe bars. lookahead_on
+// makes that confirmed value available across the following lower-timeframe bar.
 //==============================================================================
 
-bool crossedAboveSwing = ta.crossover(close, lastSwingHigh)
-bool crossedBelowSwing = ta.crossunder(close, lastSwingLow)
-bool longAllowed = cfg_direction == "Long" or cfg_direction == "Both"
-bool shortAllowed = cfg_direction == "Short" or cfg_direction == "Both"
+f_htfDirection(string _timeframe, int _emaLength) =>
+    request.security(
+         syminfo.tickerid,
+         _timeframe,
+         close[1] > ta.ema(close, _emaLength)[1] ? 1 : close[1] < ta.ema(close, _emaLength)[1] ? -1 : 0,
+         gaps = barmerge.gaps_off,
+         lookahead = barmerge.lookahead_on
+    )
 
-bool longTrendPass = not cfg_useTrendFilter or (close > fastEma and fastEma > slowEma and slowEma > slowEma[cfg_slopeLookback])
-bool shortTrendPass = not cfg_useTrendFilter or (close < fastEma and fastEma < slowEma and slowEma < slowEma[cfg_slopeLookback])
-
-bool longAdxPass = not cfg_useAdxFilter or (adx >= cfg_minAdx and plusDi > minusDi)
-bool shortAdxPass = not cfg_useAdxFilter or (adx >= cfg_minAdx and minusDi > plusDi)
-
-bool volumePass = not cfg_useVolumeFilter or (not na(relativeVolume) and relativeVolume >= cfg_minRelativeVolume)
-
-float candleRange = high - low
-float candleBody = math.abs(close - open)
-float closeLocation = candleRange > 0.0 ? (close - low) / candleRange : 0.5
-bool longCandlePass = not cfg_useBreakoutCandleFilter or (candleBody >= atr * cfg_minBodyAtr and close > open and closeLocation >= cfg_closeStrength)
-bool shortCandlePass = not cfg_useBreakoutCandleFilter or (candleBody >= atr * cfg_minBodyAtr and close < open and closeLocation <= 1.0 - cfg_closeStrength)
-
-var int g_lastExitBar = na
-bool exitDetected = strategy.position_size == 0 and strategy.position_size[1] != 0
-if exitDetected
-    g_lastExitBar := bar_index
-
-bool cooldownPass = na(g_lastExitBar) or bar_index - g_lastExitBar >= cfg_cooldownBars
-
-bool longSetup = barstate.isconfirmed and longAllowed and cooldownPass and crossedAboveSwing and longTrendPass and longAdxPass and volumePass and longCandlePass
-bool shortSetup = barstate.isconfirmed and shortAllowed and cooldownPass and crossedBelowSwing and shortTrendPass and shortAdxPass and volumePass and shortCandlePass
+int htf1Direction = f_htfDirection(cfg_htf1, cfg_htfEmaLength)
+int htf2Direction = f_htfDirection(cfg_htf2, cfg_htfEmaLength)
 
 //==============================================================================
-// 04. ORDERS AND RISK MANAGEMENT
+// 04. DIRECTION SCORE AND FRESH CALLS
 //==============================================================================
 
-var float g_pendingAtr = na
-var float g_entryAtr = na
-var int g_entryBar = na
+int bullScore = (structureBull ? 35 : 0) + (emaBull ? 15 : 0) + (htf1Direction == 1 ? 20 : 0) + (htf2Direction == 1 ? 20 : 0) + (volumePass ? 10 : 0)
+int bearScore = (structureBear ? 35 : 0) + (emaBear ? 15 : 0) + (htf1Direction == -1 ? 20 : 0) + (htf2Direction == -1 ? 20 : 0) + (volumePass ? 10 : 0)
 
-if strategy.position_size == 0
-    if longSetup
-        g_pendingAtr := atr
-        strategy.entry("Long", strategy.long)
-    else if shortSetup
-        g_pendingAtr := atr
-        strategy.entry("Short", strategy.short)
+int directionState = bullScore >= cfg_minDirectionScore and bullScore > bearScore ? 1 : bearScore >= cfg_minDirectionScore and bearScore > bullScore ? -1 : 0
+string directionText = directionState == 1 ? "BULLISH" : directionState == -1 ? "BEARISH" : "NEUTRAL"
+color directionColor = directionState == 1 ? color.lime : directionState == -1 ? color.red : color.silver
 
-bool positionOpened = strategy.position_size != 0 and strategy.position_size[1] == 0
-if positionOpened
-    g_entryAtr := g_pendingAtr
-    g_entryBar := bar_index
-
-float activeStop = na
-float activeTarget = na
-
-if strategy.position_size > 0 and not na(g_entryAtr)
-    activeStop := strategy.position_avg_price - g_entryAtr * cfg_stopAtr
-    activeTarget := strategy.position_avg_price + g_entryAtr * cfg_stopAtr * cfg_rewardRisk
-    strategy.exit("Long bracket", "Long", stop = activeStop, limit = activeTarget)
-
-if strategy.position_size < 0 and not na(g_entryAtr)
-    activeStop := strategy.position_avg_price + g_entryAtr * cfg_stopAtr
-    activeTarget := strategy.position_avg_price - g_entryAtr * cfg_stopAtr * cfg_rewardRisk
-    strategy.exit("Short bracket", "Short", stop = activeStop, limit = activeTarget)
-
-bool holdingLimitReached = strategy.position_size != 0 and not na(g_entryBar) and bar_index - g_entryBar >= cfg_maxHoldingBars
-if holdingLimitReached and strategy.position_size > 0
-    strategy.close("Long", comment = "Time exit")
-if holdingLimitReached and strategy.position_size < 0
-    strategy.close("Short", comment = "Time exit")
-
-if strategy.position_size == 0 and not longSetup and not shortSetup
-    g_entryAtr := na
-    g_entryBar := na
+bool bullCall = barstate.isconfirmed and directionState == 1 and nz(directionState[1]) != 1
+bool bearCall = barstate.isconfirmed and directionState == -1 and nz(directionState[1]) != -1
 
 //==============================================================================
-// 05. VISUAL VALIDATION
+// 05. DIRECTIONAL ACCURACY AUDIT
+// A call is correct if price is in the called direction after the selected
+// horizon. This measures direction only, independently from entries/stops/TP.
 //==============================================================================
 
-plot(fastEma, "Fast trend EMA", color = color.orange, linewidth = 2)
-plot(slowEma, "Slow regime EMA", color = color.blue, linewidth = 2)
-plot(cfg_showLevels ? activeStop : na, "Active stop", color = color.red, style = plot.style_linebr)
-plot(cfg_showLevels ? activeTarget : na, "Active target", color = color.lime, style = plot.style_linebr)
+var int g_totalCalls = 0
+var int g_correctCalls = 0
+var int g_bullCalls = 0
+var int g_bullCorrect = 0
+var int g_bearCalls = 0
+var int g_bearCorrect = 0
 
-plotshape(cfg_showSetups and longSetup, title = "Accepted long setup", style = shape.triangleup, location = location.belowbar, color = color.lime, size = size.tiny, text = "L+")
-plotshape(cfg_showSetups and shortSetup, title = "Accepted short setup", style = shape.triangledown, location = location.abovebar, color = color.red, size = size.tiny, text = "S+")
+if barstate.isconfirmed and bullCall[cfg_evaluationBars]
+    g_totalCalls += 1
+    g_bullCalls += 1
+    if close > close[cfg_evaluationBars]
+        g_correctCalls += 1
+        g_bullCorrect += 1
+
+if barstate.isconfirmed and bearCall[cfg_evaluationBars]
+    g_totalCalls += 1
+    g_bearCalls += 1
+    if close < close[cfg_evaluationBars]
+        g_correctCalls += 1
+        g_bearCorrect += 1
+
+float accuracy = g_totalCalls > 0 ? g_correctCalls * 100.0 / g_totalCalls : na
+float bullAccuracy = g_bullCalls > 0 ? g_bullCorrect * 100.0 / g_bullCalls : na
+float bearAccuracy = g_bearCalls > 0 ? g_bearCorrect * 100.0 / g_bearCalls : na
+string auditStatus = g_totalCalls < cfg_minSamples ? "MORE SAMPLES NEEDED" : accuracy >= 55.0 ? "DIRECTION EDGE CANDIDATE" : "NO DIRECTION EDGE"
 
 //==============================================================================
-// END OF v0.2.0
-// Next validation: compare v0.1 and v0.2 over the same BTC 4H period, then
-// repeat the winning configuration on an untouched period and other symbols.
+// 06. VISUALS
+//==============================================================================
+
+plot(cfg_showEma ? fastEma : na, "Fast EMA", color = color.orange, linewidth = 2)
+plot(cfg_showEma ? slowEma : na, "Slow EMA", color = color.blue, linewidth = 2)
+plotshape(cfg_showCalls and bullCall, title = "Bullish direction call", style = shape.labelup, location = location.belowbar, color = color.lime, textcolor = color.black, size = size.tiny, text = "DIR +")
+plotshape(cfg_showCalls and bearCall, title = "Bearish direction call", style = shape.labeldown, location = location.abovebar, color = color.red, textcolor = color.white, size = size.tiny, text = "DIR -")
+
+var table g_dashboard = table.new(position.top_right, 2, 10, border_width = 1)
+
+f_cell(int _column, int _row, string _text, color _background, color _textColor) =>
+    table.cell(g_dashboard, _column, _row, _text, bgcolor = _background, text_color = _textColor, text_size = size.tiny)
+
+if barstate.islast and cfg_showDashboard
+    color headerBg = color.rgb(20, 31, 45)
+    color labelBg = color.rgb(38, 48, 61)
+    color valueBg = color.rgb(28, 35, 45)
+    f_cell(0, 0, "PARANA DIRECTION", headerBg, color.white)
+    f_cell(1, 0, "v0.1 AUDIT", headerBg, color.white)
+    f_cell(0, 1, "Current direction", labelBg, color.white)
+    f_cell(1, 1, directionText + " " + str.tostring(math.max(bullScore, bearScore)), directionColor, color.black)
+    f_cell(0, 2, "Local structure", labelBg, color.white)
+    f_cell(1, 2, structureBull ? "BULLISH" : structureBear ? "BEARISH" : "NEUTRAL", valueBg, color.white)
+    f_cell(0, 3, "HTF " + cfg_htf1, labelBg, color.white)
+    f_cell(1, 3, htf1Direction == 1 ? "BULLISH" : htf1Direction == -1 ? "BEARISH" : "NEUTRAL", valueBg, color.white)
+    f_cell(0, 4, "HTF " + cfg_htf2, labelBg, color.white)
+    f_cell(1, 4, htf2Direction == 1 ? "BULLISH" : htf2Direction == -1 ? "BEARISH" : "NEUTRAL", valueBg, color.white)
+    f_cell(0, 5, "Relative volume", labelBg, color.white)
+    f_cell(1, 5, na(relativeVolume) ? "n/a" : str.tostring(relativeVolume, "#.##") + "x", valueBg, color.white)
+    f_cell(0, 6, "Calls evaluated", labelBg, color.white)
+    f_cell(1, 6, str.tostring(g_totalCalls), valueBg, color.white)
+    f_cell(0, 7, "Overall accuracy", labelBg, color.white)
+    f_cell(1, 7, na(accuracy) ? "n/a" : str.tostring(accuracy, "#.0") + "%", valueBg, color.white)
+    f_cell(0, 8, "Bull / Bear hit rate", labelBg, color.white)
+    f_cell(1, 8, (na(bullAccuracy) ? "n/a" : str.tostring(bullAccuracy, "#.0") + "%") + " / " + (na(bearAccuracy) ? "n/a" : str.tostring(bearAccuracy, "#.0") + "%"), valueBg, color.white)
+    f_cell(0, 9, "Audit result", labelBg, color.white)
+    f_cell(1, 9, auditStatus, auditStatus == "DIRECTION EDGE CANDIDATE" ? color.lime : auditStatus == "NO DIRECTION EDGE" ? color.red : color.orange, color.black)
+
+//==============================================================================
+// END OF v0.1.0
 //==============================================================================

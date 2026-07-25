@@ -1,6 +1,5 @@
-# ParanaProject
-gestionar Paraná Project como un proyecto Open Source de nivel profesional
-PARANÁ PROJECT
+// PARANÁ PROJECT
+// Institutional Market Intelligence
 
 Market Structure:
 BULLISH

@@ -3,17 +3,16 @@
 // PARANA PROJECT
 // Institutional Market Intelligence
 //------------------------------------------------------------------------------
-// Version : v1.0.0 Decision Profile
+// Version : v1.1.0 Liquidity Diagnostics
 // Type    : Indicator
 //
-// This release integrates structure, higher-timeframe alignment, and volume
-// into a transparent decision profile. It remains diagnostic and does not
-// emit entries, exits, or buy/sell instructions.
+// This release adds equal-high/equal-low liquidity zones and confirmed sweep
+// diagnostics. It remains diagnostic and does not emit trade instructions.
 //==============================================================================
 
 indicator(
-     title = "Parana Project v1.0.0 - Decision Profile",
-     shorttitle = "PARANA v1.0",
+     title = "Parana Project v1.1.0 - Liquidity Diagnostics",
+     shorttitle = "PARANA v1.1",
      overlay = true,
      max_labels_count = 200,
      max_lines_count = 200,
@@ -25,7 +24,7 @@ indicator(
 //==============================================================================
 
 const string c_PROJECT_NAME = "PARANA PROJECT"
-const string c_VERSION = "v1.0.0 Decision Profile"
+const string c_VERSION = "v1.1.0 Liquidity Diagnostics"
 const string c_ENGINE_NAME = "Parana Structure Engine"
 const string c_STATUS_RUNNING = "RUNNING"
 
@@ -35,7 +34,7 @@ const int c_MAX_SWINGS = 200
 const int c_MAX_RENDERED_LABELS = 190
 
 const int c_DASHBOARD_COLUMNS = 2
-const int c_DASHBOARD_ROWS = 32
+const int c_DASHBOARD_ROWS = 36
 
 //==============================================================================
 // 02. USER CONFIGURATION
@@ -48,7 +47,8 @@ string cfg_groupMtf = "04 - Higher-Timeframe Context"
 string cfg_groupHorizon = "05 - Trade Horizon"
 string cfg_groupVolume = "06 - Volume Context"
 string cfg_groupDecision = "07 - Decision Profile"
-string cfg_groupDev = "08 - Development"
+string cfg_groupLiquidity = "08 - Liquidity Diagnostics"
+string cfg_groupDev = "09 - Development"
 
 bool cfg_showDashboard = input.bool(
      defval = true,
@@ -163,6 +163,22 @@ bool cfg_showDecisionProfile = input.bool(
      tooltip = "Combines local structure, HTF alignment, and volume into an explainable diagnostic profile."
 )
 
+bool cfg_showLiquidity = input.bool(
+     defval = true,
+     title = "Show liquidity diagnostics",
+     group = cfg_groupLiquidity,
+     tooltip = "Draws equal-high/equal-low zones and confirmed liquidity sweeps."
+)
+
+float cfg_equalLevelTolerancePct = input.float(
+     defval = 0.15,
+     title = "Equal-level tolerance (%)",
+     minval = 0.01,
+     step = 0.01,
+     group = cfg_groupLiquidity,
+     tooltip = "Maximum percentage difference between two same-type swings to classify them as equal highs or lows."
+)
+
 bool cfg_developerMode = input.bool(
      defval = false,
      title = "Developer mode",
@@ -203,6 +219,11 @@ var string g_trendState = "NEUTRAL"
 var string g_lastStructureEvent = "None"
 var int g_lastBullBreakSwingId = na
 var int g_lastBearBreakSwingId = na
+var int g_equalHighCount = 0
+var int g_equalLowCount = 0
+var int g_lastHighSweepSwingId = na
+var int g_lastLowSweepSwingId = na
+var string g_lastLiquidityEvent = "None"
 
 var table g_dashboard = table.new(
      position.top_right,
@@ -425,6 +446,14 @@ f_lastPriceByKind(int _kind) =>
                 break
     lastPrice
 
+f_isEqualLevel(int _kind, float _price) =>
+    float previousSameKindPrice = f_lastPriceByKind(_kind)
+    bool isEqual = false
+    if not na(previousSameKindPrice) and previousSameKindPrice != 0.0
+        float differencePct = math.abs(_price - previousSameKindPrice) / previousSameKindPrice * 100.0
+        isEqual := differencePct <= cfg_equalLevelTolerancePct
+    isEqual
+
 f_lastIdByKind(int _kind) =>
     int lastId = na
     int swingCount = array.size(g_swings)
@@ -512,6 +541,45 @@ f_drawStructureBreak(bool _isBullish, float _level, string _eventText) =>
              size = size.small
         )
 
+        if array.size(g_swingLabels) >= c_MAX_RENDERED_LABELS
+            label.delete(array.shift(g_swingLabels))
+        array.push(g_swingLabels, newLabel)
+
+f_drawEqualLevel(int _kind, float _price, int _barIndex) =>
+    if cfg_showLiquidity
+        string equalText = _kind == c_SWING_HIGH ? "EQH" : "EQL"
+        labelStyle = _kind == c_SWING_HIGH ? label.style_label_down : label.style_label_up
+        label newLabel = label.new(
+             _barIndex,
+             _price,
+             equalText,
+             xloc = xloc.bar_index,
+             yloc = yloc.price,
+             color = color.yellow,
+             style = labelStyle,
+             textcolor = color.black,
+             size = size.tiny
+        )
+        if array.size(g_swingLabels) >= c_MAX_RENDERED_LABELS
+            label.delete(array.shift(g_swingLabels))
+        array.push(g_swingLabels, newLabel)
+
+f_drawLiquiditySweep(bool _isHighSweep, float _level) =>
+    if cfg_showLiquidity
+        string sweepText = _isHighSweep ? "SWEEP HIGH" : "SWEEP LOW"
+        color sweepColor = _isHighSweep ? color.yellow : color.aqua
+        labelStyle = _isHighSweep ? label.style_label_down : label.style_label_up
+        label newLabel = label.new(
+             bar_index,
+             _level,
+             sweepText,
+             xloc = xloc.bar_index,
+             yloc = yloc.price,
+             color = sweepColor,
+             style = labelStyle,
+             textcolor = color.black,
+             size = size.small
+        )
         if array.size(g_swingLabels) >= c_MAX_RENDERED_LABELS
             label.delete(array.shift(g_swingLabels))
         array.push(g_swingLabels, newLabel)
@@ -672,6 +740,19 @@ f_renderDashboard() =>
                 f_setDashboardCell(0, 31, "Caution", labelBackground, color.silver)
                 f_setDashboardCell(1, 31, f_primaryCaution(decisionStructureScore, htfAlignment, decisionVolumeScore), valueBackground, color.white)
 
+            if cfg_showLiquidity
+                f_setDashboardCell(0, 32, "Liquidity status", labelBackground, color.silver)
+                f_setDashboardCell(1, 32, g_lastLiquidityEvent == "None" ? "MONITORING" : "EVENT DETECTED", valueBackground, color.white)
+
+                f_setDashboardCell(0, 33, "Equal highs", labelBackground, color.silver)
+                f_setDashboardCell(1, 33, str.tostring(g_equalHighCount), valueBackground, color.white)
+
+                f_setDashboardCell(0, 34, "Equal lows", labelBackground, color.silver)
+                f_setDashboardCell(1, 34, str.tostring(g_equalLowCount), valueBackground, color.white)
+
+                f_setDashboardCell(0, 35, "Last liquidity", labelBackground, color.silver)
+                f_setDashboardCell(1, 35, g_lastLiquidityEvent, valueBackground, color.white)
+
 //==============================================================================
 // 08. MAIN LOOP
 //==============================================================================
@@ -679,10 +760,15 @@ f_renderDashboard() =>
 if sw_newHigh
     float strength = f_swingStrength(sw_pivotHigh)
     if f_isSwingAccepted(c_SWING_HIGH, sw_pivotHigh)
+        bool isEqualHigh = f_isEqualLevel(c_SWING_HIGH, sw_pivotHigh)
         string classification = f_classifySwing(c_SWING_HIGH, sw_pivotHigh)
         Swing newSwing = f_newSwing(c_SWING_HIGH, sw_pivotHigh, bar_index - cfg_pivotLength, time[cfg_pivotLength], strength, classification)
         f_storeSwing(newSwing)
         f_drawSwing(newSwing)
+        if isEqualHigh
+            g_equalHighCount += 1
+            g_lastLiquidityEvent := "EQH @ " + str.tostring(sw_pivotHigh, format.mintick)
+            f_drawEqualLevel(c_SWING_HIGH, sw_pivotHigh, bar_index - cfg_pivotLength)
         g_nextSwingId += 1
         g_lastLog := "Accepted " + classification + ": " + str.tostring(sw_pivotHigh, format.mintick)
     else
@@ -691,10 +777,15 @@ if sw_newHigh
 else if sw_newLow
     float strength = f_swingStrength(sw_pivotLow)
     if f_isSwingAccepted(c_SWING_LOW, sw_pivotLow)
+        bool isEqualLow = f_isEqualLevel(c_SWING_LOW, sw_pivotLow)
         string classification = f_classifySwing(c_SWING_LOW, sw_pivotLow)
         Swing newSwing = f_newSwing(c_SWING_LOW, sw_pivotLow, bar_index - cfg_pivotLength, time[cfg_pivotLength], strength, classification)
         f_storeSwing(newSwing)
         f_drawSwing(newSwing)
+        if isEqualLow
+            g_equalLowCount += 1
+            g_lastLiquidityEvent := "EQL @ " + str.tostring(sw_pivotLow, format.mintick)
+            f_drawEqualLevel(c_SWING_LOW, sw_pivotLow, bar_index - cfg_pivotLength)
         g_nextSwingId += 1
         g_lastLog := "Accepted " + classification + ": " + str.tostring(sw_pivotLow, format.mintick)
     else
@@ -730,9 +821,31 @@ else if str_bearBreak
     g_lastLog := g_lastStructureEvent
     f_drawStructureBreak(false, str_lastLowPrice, eventText)
 
+// A sweep is a confirmed wick through the latest liquidity level followed by
+// a close back inside that level. Each swing level can produce one sweep event.
+float liq_lastHighPrice = f_lastPriceByKind(c_SWING_HIGH)
+float liq_lastLowPrice = f_lastPriceByKind(c_SWING_LOW)
+int liq_lastHighId = f_lastIdByKind(c_SWING_HIGH)
+int liq_lastLowId = f_lastIdByKind(c_SWING_LOW)
+
+bool liq_highSweep = barstate.isconfirmed and not na(liq_lastHighPrice) and high > liq_lastHighPrice and close < liq_lastHighPrice and (na(g_lastHighSweepSwingId) or liq_lastHighId != g_lastHighSweepSwingId)
+bool liq_lowSweep = barstate.isconfirmed and not na(liq_lastLowPrice) and low < liq_lastLowPrice and close > liq_lastLowPrice and (na(g_lastLowSweepSwingId) or liq_lastLowId != g_lastLowSweepSwingId)
+
+if liq_highSweep
+    g_lastHighSweepSwingId := liq_lastHighId
+    g_lastLiquidityEvent := "SWEEP HIGH @ " + str.tostring(liq_lastHighPrice, format.mintick)
+    g_lastLog := g_lastLiquidityEvent
+    f_drawLiquiditySweep(true, liq_lastHighPrice)
+
+else if liq_lowSweep
+    g_lastLowSweepSwingId := liq_lastLowId
+    g_lastLiquidityEvent := "SWEEP LOW @ " + str.tostring(liq_lastLowPrice, format.mintick)
+    g_lastLog := g_lastLiquidityEvent
+    f_drawLiquiditySweep(false, liq_lastLowPrice)
+
 f_renderDashboard()
 
 //==============================================================================
-// END OF v1.0.0 DECISION PROFILE
-// Next planned increment: v1.1.0 Liquidity sweep diagnostics.
+// END OF v1.1.0 LIQUIDITY DIAGNOSTICS
+// Next planned increment: v1.2.0 Liquidity score and decision integration.
 //==============================================================================

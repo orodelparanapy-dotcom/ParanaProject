@@ -3,17 +3,16 @@
 // PARANA PROJECT
 // Institutional Market Intelligence
 //------------------------------------------------------------------------------
-// Version : v0.8.0 Trade Horizon
+// Version : v0.9.0 Volume Context
 // Type    : Indicator
 //
-// This release translates timeframe and confirmed HTF alignment into an
-// operational horizon. It remains a diagnostic tool and never emits entries,
-// exits, or buy/sell advice.
+// This release measures confirmed relative volume and current participation.
+// It remains diagnostic: volume does not create an entry or trade instruction.
 //==============================================================================
 
 indicator(
-     title = "Parana Project v0.8.0 - Trade Horizon",
-     shorttitle = "PARANA v0.8",
+     title = "Parana Project v0.9.0 - Volume Context",
+     shorttitle = "PARANA v0.9",
      overlay = true,
      max_labels_count = 200,
      max_lines_count = 200,
@@ -25,7 +24,7 @@ indicator(
 //==============================================================================
 
 const string c_PROJECT_NAME = "PARANA PROJECT"
-const string c_VERSION = "v0.8.0 Trade Horizon"
+const string c_VERSION = "v0.9.0 Volume Context"
 const string c_ENGINE_NAME = "Parana Structure Engine"
 const string c_STATUS_RUNNING = "RUNNING"
 
@@ -35,7 +34,7 @@ const int c_MAX_SWINGS = 200
 const int c_MAX_RENDERED_LABELS = 190
 
 const int c_DASHBOARD_COLUMNS = 2
-const int c_DASHBOARD_ROWS = 21
+const int c_DASHBOARD_ROWS = 25
 
 //==============================================================================
 // 02. USER CONFIGURATION
@@ -46,7 +45,8 @@ string cfg_groupSwing = "02 - Swing Engine"
 string cfg_groupStructure = "03 - Structure Breaks"
 string cfg_groupMtf = "04 - Higher-Timeframe Context"
 string cfg_groupHorizon = "05 - Trade Horizon"
-string cfg_groupDev = "06 - Development"
+string cfg_groupVolume = "06 - Volume Context"
+string cfg_groupDev = "07 - Development"
 
 bool cfg_showDashboard = input.bool(
      defval = true,
@@ -127,6 +127,31 @@ bool cfg_showTradeHorizon = input.bool(
      title = "Show trade horizon",
      group = cfg_groupHorizon,
      tooltip = "Classifies the natural management horizon from the chart timeframe and HTF alignment."
+)
+
+bool cfg_showVolumeContext = input.bool(
+     defval = true,
+     title = "Show volume context",
+     group = cfg_groupVolume,
+     tooltip = "Shows confirmed relative volume and participation diagnostics."
+)
+
+int cfg_volumeLength = input.int(
+     defval = 20,
+     title = "Relative volume lookback",
+     minval = 5,
+     maxval = 200,
+     group = cfg_groupVolume,
+     tooltip = "Number of bars used for average volume."
+)
+
+float cfg_highRelativeVolume = input.float(
+     defval = 1.50,
+     title = "High relative volume threshold",
+     minval = 1.01,
+     step = 0.05,
+     group = cfg_groupVolume,
+     tooltip = "A relative-volume ratio at or above this level is classified as high participation."
 )
 
 bool cfg_developerMode = input.bool(
@@ -230,6 +255,25 @@ f_managementGuidance(float _alignment) =>
     _alignment >= 100.0 ? "Manage within stated horizon" :
      _alignment >= 66.0 ? "Use conservative duration" :
      _alignment > 0.0 ? "Do not extend the setup" : "Wait for HTF context"
+
+f_volumeScore(float _relativeVolume) =>
+    na(_relativeVolume) ? 50.0 :
+     _relativeVolume >= cfg_highRelativeVolume * 1.5 ? 100.0 :
+     _relativeVolume >= cfg_highRelativeVolume ? 85.0 :
+     _relativeVolume >= 1.0 ? 70.0 :
+     _relativeVolume >= 0.75 ? 55.0 : 35.0
+
+f_volumeState(float _relativeVolume) =>
+    na(_relativeVolume) ? "UNAVAILABLE" :
+     _relativeVolume >= cfg_highRelativeVolume ? "HIGH PARTICIPATION" :
+     _relativeVolume >= 1.0 ? "NORMAL PARTICIPATION" : "LOW PARTICIPATION"
+
+f_volumeParticipation(float _relativeVolume, float _confirmedClose, float _confirmedOpen) =>
+    bool supportsBullish = g_trendState == "BULLISH" and _confirmedClose > _confirmedOpen and _relativeVolume >= 1.0
+    bool supportsBearish = g_trendState == "BEARISH" and _confirmedClose < _confirmedOpen and _relativeVolume >= 1.0
+    na(_relativeVolume) ? "NO VOLUME DATA" :
+     supportsBullish or supportsBearish ? "SUPPORTIVE" :
+     _relativeVolume < 0.75 ? "WEAK PARTICIPATION" : "NOT CONFIRMING"
 
 // This compact, stateful structure model runs inside request.security(). It is
 // intentionally display-only in v0.8.0; the full local PSE remains the source
@@ -455,6 +499,14 @@ int mtf_directionOne = request.security(syminfo.tickerid, cfg_htfOne, f_htfDirec
 int mtf_directionTwo = request.security(syminfo.tickerid, cfg_htfTwo, f_htfDirection(cfg_pivotLength)[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
 int mtf_directionThree = request.security(syminfo.tickerid, cfg_htfThree, f_htfDirection(cfg_pivotLength)[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
 
+// Current realtime volume is incomplete. The dashboard therefore uses the
+// previous completed bar until the current bar closes.
+float vol_average = ta.sma(volume, cfg_volumeLength)
+float vol_relativeRaw = not na(vol_average) and vol_average > 0.0 ? volume / vol_average : na
+float vol_relativeConfirmed = barstate.isconfirmed ? vol_relativeRaw : vol_relativeRaw[1]
+float vol_confirmedClose = barstate.isconfirmed ? close : close[1]
+float vol_confirmedOpen = barstate.isconfirmed ? open : open[1]
+
 //==============================================================================
 // 07. DASHBOARD
 //==============================================================================
@@ -548,6 +600,20 @@ f_renderDashboard() =>
                 f_setDashboardCell(0, 20, "Management", labelBackground, color.silver)
                 f_setDashboardCell(1, 20, f_managementGuidance(htfAlignment), valueBackground, color.white)
 
+            if cfg_showVolumeContext
+                float volumeScore = f_volumeScore(vol_relativeConfirmed)
+                f_setDashboardCell(0, 21, "Relative volume", labelBackground, color.silver)
+                f_setDashboardCell(1, 21, na(vol_relativeConfirmed) ? "N/A" : str.tostring(vol_relativeConfirmed, "#.00") + "x", valueBackground, color.white)
+
+                f_setDashboardCell(0, 22, "Volume state", labelBackground, color.silver)
+                f_setDashboardCell(1, 22, f_volumeState(vol_relativeConfirmed), valueBackground, color.white)
+
+                f_setDashboardCell(0, 23, "Volume score", labelBackground, color.silver)
+                f_setDashboardCell(1, 23, str.tostring(volumeScore, "#.0") + " / 100", valueBackground, color.white)
+
+                f_setDashboardCell(0, 24, "Participation", labelBackground, color.silver)
+                f_setDashboardCell(1, 24, f_volumeParticipation(vol_relativeConfirmed, vol_confirmedClose, vol_confirmedOpen), valueBackground, color.white)
+
 //==============================================================================
 // 08. MAIN LOOP
 //==============================================================================
@@ -609,6 +675,6 @@ else if str_bearBreak
 f_renderDashboard()
 
 //==============================================================================
-// END OF v0.8.0 TRADE HORIZON
-// Next planned increment: v0.9.0 Relative volume and participation context.
+// END OF v0.9.0 VOLUME CONTEXT
+// Next planned increment: v1.0.0 Decision profile and explanation engine.
 //==============================================================================

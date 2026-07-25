@@ -3,17 +3,17 @@
 // PARANA PROJECT
 // Institutional Market Intelligence
 //------------------------------------------------------------------------------
-// Version : v1.4.0 Compact Dashboard
+// Version : v1.5.0 Price Action Context
 // Type    : Indicator
 //
-// This release reorganizes the dashboard into a compact horizontal layout.
-// All diagnostics remain available, but the panel no longer extends below the
-// visible chart area.
+// This release adds confirmed price-action patterns and measures whether they
+// support the active structure. Markers are optional and no trade instructions
+// are generated.
 //==============================================================================
 
 indicator(
-     title = "Parana Project v1.4.0 - Compact Dashboard",
-     shorttitle = "PARANA v1.4",
+     title = "Parana Project v1.5.0 - Price Action Context",
+     shorttitle = "PARANA v1.5",
      overlay = true,
      max_labels_count = 200,
      max_lines_count = 200,
@@ -25,7 +25,7 @@ indicator(
 //==============================================================================
 
 const string c_PROJECT_NAME = "PARANA PROJECT"
-const string c_VERSION = "v1.4.0 Compact Dashboard"
+const string c_VERSION = "v1.5.0 Price Action Context"
 const string c_ENGINE_NAME = "Parana Structure Engine"
 const string c_STATUS_RUNNING = "RUNNING"
 
@@ -35,7 +35,7 @@ const int c_MAX_SWINGS = 200
 const int c_MAX_RENDERED_LABELS = 190
 
 const int c_DASHBOARD_COLUMNS = 6
-const int c_DASHBOARD_ROWS = 6
+const int c_DASHBOARD_ROWS = 7
 
 //==============================================================================
 // 02. USER CONFIGURATION
@@ -50,7 +50,8 @@ string cfg_groupVolume = "06 - Volume Context"
 string cfg_groupDecision = "07 - Decision Profile"
 string cfg_groupLiquidity = "08 - Liquidity Diagnostics"
 string cfg_groupBosQuality = "09 - BOS Follow-Through"
-string cfg_groupDev = "10 - Development"
+string cfg_groupPriceAction = "10 - Price Action"
+string cfg_groupDev = "11 - Development"
 
 bool cfg_showDashboard = input.bool(
      defval = true,
@@ -217,6 +218,22 @@ float cfg_bosRequiredAtrMove = input.float(
      tooltip = "Minimum post-BOS expansion, in ATRs, required for a 100 follow-through score."
 )
 
+bool cfg_showPriceActionMarkers = input.bool(
+     defval = false,
+     title = "Show price-action markers",
+     group = cfg_groupPriceAction,
+     tooltip = "Displays confirmed engulfing, pin bar, and inside bar labels. Disabled by default to keep the chart clean."
+)
+
+int cfg_priceActionWindow = input.int(
+     defval = 5,
+     title = "Pattern validity window (bars)",
+     minval = 1,
+     maxval = 50,
+     group = cfg_groupPriceAction,
+     tooltip = "Bars for which the latest confirmed price-action pattern influences the score."
+)
+
 bool cfg_developerMode = input.bool(
      defval = false,
      title = "Developer mode",
@@ -267,6 +284,10 @@ var int g_lastBosDirection = 0
 var float g_lastBosBreakPrice = na
 var float g_lastBosAtr = na
 var int g_lastBosEventBar = na
+var string g_lastPriceActionEvent = "None"
+var int g_lastPriceActionDirection = 0
+var int g_lastPriceActionBar = na
+var float g_lastPriceActionScore = 50.0
 
 var table g_dashboard = table.new(
      position.top_right,
@@ -348,12 +369,13 @@ f_volumeParticipation(float _relativeVolume, float _confirmedClose, float _confi
      supportsBullish or supportsBearish ? "SUPPORTIVE" :
      _relativeVolume < 0.75 ? "WEAK PARTICIPATION" : "NOT CONFIRMING"
 
-// Decision Profile v1.2 weights:
-// Structure 40%, higher-timeframe alignment 25%, volume 20%, liquidity 15%.
+// Decision Profile v1.5 weights:
+// Structure 35%, higher-timeframe alignment 25%, volume 15%, liquidity 15%,
+// and confirmed price action 10%.
 // Penalties prevent a visually strong chart from receiving a high profile when
 // participation is weak or higher-timeframe context is conflicted.
-f_decisionScore(float _structureScore, float _htfAlignment, float _volumeScore, float _liquidityScore, float _bosQuality, bool _bosEvaluated) =>
-    float score = _structureScore * 0.40 + _htfAlignment * 0.25 + _volumeScore * 0.20 + _liquidityScore * 0.15
+f_decisionScore(float _structureScore, float _htfAlignment, float _volumeScore, float _liquidityScore, float _priceActionScore, float _bosQuality, bool _bosEvaluated) =>
+    float score = _structureScore * 0.35 + _htfAlignment * 0.25 + _volumeScore * 0.15 + _liquidityScore * 0.15 + _priceActionScore * 0.10
     if _volumeScore < 55.0
         score -= 10.0
     if _htfAlignment < 66.0
@@ -370,11 +392,12 @@ f_decisionClass(float _score) =>
 f_decisionContext(float _score) =>
     _score >= 85.0 ? "HIGH CONFLUENCE" : _score >= 70.0 ? "CONDITIONAL CONTEXT" : _score >= 60.0 ? "MIXED CONTEXT" : "WAIT FOR CLARITY"
 
-f_primaryCaution(float _structureScore, float _htfAlignment, float _volumeScore, float _liquidityScore, float _bosQuality, bool _bosEvaluated) =>
+f_primaryCaution(float _structureScore, float _htfAlignment, float _volumeScore, float _liquidityScore, float _priceActionScore, float _bosQuality, bool _bosEvaluated) =>
     _bosEvaluated and _bosQuality < 50.0 ? "BOS lacks follow-through" :
      _volumeScore < 55.0 ? "Low volume participation" :
      _htfAlignment < 66.0 ? "Higher-timeframe conflict" :
      _liquidityScore < 45.0 ? "Adverse liquidity event" :
+     _priceActionScore < 40.0 ? "Price action contradicts trend" :
      _structureScore < 70.0 ? "Structure needs confirmation" : "No critical caution"
 
 // This compact, stateful structure model runs inside request.security(). It is
@@ -712,6 +735,53 @@ f_bosQualityState(float _quality, bool _isEvaluated) =>
      _quality >= 75.0 ? "CONFIRMED" :
      _quality >= 50.0 ? "MODERATE" : "FAILED FOLLOW-THROUGH"
 
+// Price-action candidates are calculated on every bar and accepted only after
+// the bar closes in the main loop below.
+float pa_body = math.abs(close - open)
+float pa_range = math.max(high - low, syminfo.mintick)
+float pa_upperWick = high - math.max(open, close)
+float pa_lowerWick = math.min(open, close) - low
+
+bool pa_bullishEngulfing = close > open and close[1] < open[1] and open <= close[1] and close >= open[1]
+bool pa_bearishEngulfing = close < open and close[1] > open[1] and open >= close[1] and close <= open[1]
+bool pa_bullishPinBar = pa_lowerWick >= pa_body * 2.0 and pa_lowerWick / pa_range >= 0.55 and close >= low + pa_range * 0.60
+bool pa_bearishPinBar = pa_upperWick >= pa_body * 2.0 and pa_upperWick / pa_range >= 0.55 and close <= high - pa_range * 0.60
+bool pa_insideBar = high < high[1] and low > low[1]
+
+f_priceActionAge() =>
+    na(g_lastPriceActionBar) ? na : bar_index - g_lastPriceActionBar
+
+f_priceActionScore() =>
+    int patternAge = f_priceActionAge()
+    not na(patternAge) and patternAge <= cfg_priceActionWindow ? g_lastPriceActionScore : 50.0
+
+f_priceActionState(float _score) =>
+    int patternAge = f_priceActionAge()
+    na(patternAge) or patternAge > cfg_priceActionWindow ? "NO RECENT PATTERN" :
+     _score >= 70.0 ? "SUPPORTIVE" :
+     _score >= 50.0 ? "NEUTRAL" : "CONTRARY"
+
+f_drawPriceAction(int _direction, string _pattern) =>
+    if cfg_showPriceActionMarkers
+        bool isBullish = _direction == 1
+        labelStyle = isBullish ? label.style_label_up : label.style_label_down
+        float labelPrice = isBullish ? low : high
+        color labelColor = isBullish ? color.teal : color.purple
+        label newLabel = label.new(
+             bar_index,
+             labelPrice,
+             _pattern,
+             xloc = xloc.bar_index,
+             yloc = yloc.price,
+             color = labelColor,
+             style = labelStyle,
+             textcolor = color.white,
+             size = size.tiny
+        )
+        if array.size(g_swingLabels) >= c_MAX_RENDERED_LABELS
+            label.delete(array.shift(g_swingLabels))
+        array.push(g_swingLabels, newLabel)
+
 //==============================================================================
 // 07. DASHBOARD
 //==============================================================================
@@ -825,7 +895,8 @@ f_renderDashboard() =>
                 float decisionLiquidityScore = f_liquidityScore()
                 bool decisionBosEvaluated = f_bosIsEvaluated()
                 float decisionBosQuality = f_bosQuality()
-                float decisionScore = f_decisionScore(decisionStructureScore, htfAlignment, decisionVolumeScore, decisionLiquidityScore, decisionBosQuality, decisionBosEvaluated)
+                float decisionPriceActionScore = f_priceActionScore()
+                float decisionScore = f_decisionScore(decisionStructureScore, htfAlignment, decisionVolumeScore, decisionLiquidityScore, decisionPriceActionScore, decisionBosQuality, decisionBosEvaluated)
 
                 f_setDashboardCell(0, 25, "Decision score", labelBackground, color.silver)
                 f_setDashboardCell(1, 25, str.tostring(decisionScore, "#.0") + " / 100", valueBackground, color.white)
@@ -849,7 +920,7 @@ f_renderDashboard() =>
                 f_setDashboardCell(1, 31, str.tostring(decisionLiquidityScore * 0.15, "#.0") + " / 15", valueBackground, color.white)
 
                 f_setDashboardCell(0, 32, "Caution", labelBackground, color.silver)
-                f_setDashboardCell(1, 32, f_primaryCaution(decisionStructureScore, htfAlignment, decisionVolumeScore, decisionLiquidityScore, decisionBosQuality, decisionBosEvaluated), valueBackground, color.white)
+                f_setDashboardCell(1, 32, f_primaryCaution(decisionStructureScore, htfAlignment, decisionVolumeScore, decisionLiquidityScore, decisionPriceActionScore, decisionBosQuality, decisionBosEvaluated), valueBackground, color.white)
 
             if cfg_showLiquidity
                 float liquidityScore = f_liquidityScore()
@@ -894,11 +965,13 @@ f_renderCompactDashboard() =>
             float liquidityScore = f_liquidityScore()
             bool bosEvaluated = f_bosIsEvaluated()
             float bosQuality = f_bosQuality()
+            float priceActionScore = f_priceActionScore()
+            int priceActionAge = f_priceActionAge()
             float htfAlignment = f_htfAlignment(f_localDirection(), mtf_directionOne, mtf_directionTwo, mtf_directionThree)
-            float decisionScore = f_decisionScore(structureScore, htfAlignment, volumeScore, liquidityScore, bosQuality, bosEvaluated)
+            float decisionScore = f_decisionScore(structureScore, htfAlignment, volumeScore, liquidityScore, priceActionScore, bosQuality, bosEvaluated)
 
             f_setDashboardCell(0, 0, c_PROJECT_NAME, headerBackground, color.white)
-            f_setDashboardCell(1, 0, "v1.4", headerBackground, color.white)
+            f_setDashboardCell(1, 0, "v1.5", headerBackground, color.white)
             f_setDashboardCell(2, 0, syminfo.ticker, headerBackground, color.white)
             f_setDashboardCell(3, 0, timeframe.period, headerBackground, color.white)
             f_setDashboardCell(4, 0, "Decision", headerBackground, color.white)
@@ -929,15 +1002,22 @@ f_renderCompactDashboard() =>
             f_setDashboardCell(1, 4, na(vol_relativeConfirmed) ? "N/A" : str.tostring(vol_relativeConfirmed, "#.00") + "x / " + str.tostring(volumeScore, "#.0"), valueBackground, color.white)
             f_setDashboardCell(2, 4, "Liquidity", labelBackground, color.silver)
             f_setDashboardCell(3, 4, str.tostring(liquidityScore, "#.0") + " " + f_liquidityReading(liquidityScore), valueBackground, color.white)
-            f_setDashboardCell(4, 4, "BOS quality", labelBackground, color.silver)
-            f_setDashboardCell(5, 4, bosEvaluated ? str.tostring(bosQuality, "#.0") + " " + f_bosQualityState(bosQuality, bosEvaluated) : "PENDING", valueBackground, color.white)
+            f_setDashboardCell(4, 4, "Price action", labelBackground, color.silver)
+            f_setDashboardCell(5, 4, str.tostring(priceActionScore, "#.0") + " " + f_priceActionState(priceActionScore), valueBackground, color.white)
 
             f_setDashboardCell(0, 5, "Caution", labelBackground, color.silver)
-            f_setDashboardCell(1, 5, f_primaryCaution(structureScore, htfAlignment, volumeScore, liquidityScore, bosQuality, bosEvaluated), valueBackground, color.white)
+            f_setDashboardCell(1, 5, f_primaryCaution(structureScore, htfAlignment, volumeScore, liquidityScore, priceActionScore, bosQuality, bosEvaluated), valueBackground, color.white)
             f_setDashboardCell(2, 5, "Last event", labelBackground, color.silver)
             f_setDashboardCell(3, 5, g_lastStructureEvent, valueBackground, color.white)
             f_setDashboardCell(4, 5, "Last liquidity", labelBackground, color.silver)
             f_setDashboardCell(5, 5, g_lastLiquidityEvent, valueBackground, color.white)
+
+            f_setDashboardCell(0, 6, "BOS follow", labelBackground, color.silver)
+            f_setDashboardCell(1, 6, bosEvaluated ? str.tostring(bosQuality, "#.0") + " " + f_bosQualityState(bosQuality, bosEvaluated) : "PENDING", valueBackground, color.white)
+            f_setDashboardCell(2, 6, "Last pattern", labelBackground, color.silver)
+            f_setDashboardCell(3, 6, g_lastPriceActionEvent, valueBackground, color.white)
+            f_setDashboardCell(4, 6, "Pattern age", labelBackground, color.silver)
+            f_setDashboardCell(5, 6, na(priceActionAge) ? "N/A" : str.tostring(priceActionAge) + " bars", valueBackground, color.white)
 
 //==============================================================================
 // 08. MAIN LOOP
@@ -1043,9 +1123,46 @@ else if liq_lowSweep
     g_lastLog := g_lastLiquidityEvent
     f_drawLiquiditySweep(false, liq_lastLowPrice, low)
 
+// Price action is contextual: a pattern only receives a high score when its
+// direction agrees with the established structure state.
+if barstate.isconfirmed
+    string priceActionEvent = ""
+    int priceActionDirection = 0
+    float rawPriceActionScore = 50.0
+
+    if pa_bullishEngulfing
+        priceActionEvent := "BULL ENGULF"
+        priceActionDirection := 1
+        rawPriceActionScore := 85.0
+    else if pa_bearishEngulfing
+        priceActionEvent := "BEAR ENGULF"
+        priceActionDirection := -1
+        rawPriceActionScore := 85.0
+    else if pa_bullishPinBar
+        priceActionEvent := "BULL PIN"
+        priceActionDirection := 1
+        rawPriceActionScore := 75.0
+    else if pa_bearishPinBar
+        priceActionEvent := "BEAR PIN"
+        priceActionDirection := -1
+        rawPriceActionScore := 75.0
+    else if pa_insideBar and g_trendState != "NEUTRAL"
+        priceActionEvent := "INSIDE BAR"
+        priceActionDirection := f_localDirection()
+        rawPriceActionScore := 60.0
+
+    if priceActionDirection != 0
+        bool supportsStructure = (priceActionDirection == 1 and g_trendState == "BULLISH") or (priceActionDirection == -1 and g_trendState == "BEARISH")
+        g_lastPriceActionEvent := priceActionEvent
+        g_lastPriceActionDirection := priceActionDirection
+        g_lastPriceActionBar := bar_index
+        g_lastPriceActionScore := supportsStructure ? rawPriceActionScore : rawPriceActionScore * 0.40
+        g_lastLog := priceActionEvent + (supportsStructure ? " supports structure" : " contradicts structure")
+        f_drawPriceAction(priceActionDirection, priceActionEvent)
+
 f_renderCompactDashboard()
 
 //==============================================================================
-// END OF v1.4.0 COMPACT DASHBOARD
-// Next planned increment: v1.5.0 Price-action confirmation context.
+// END OF v1.5.0 PRICE ACTION CONTEXT
+// Next planned increment: v1.6.0 Alert conditions and validation workflow.
 //==============================================================================

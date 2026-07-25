@@ -3,17 +3,17 @@
 // PARANA PROJECT
 // Institutional Market Intelligence
 //------------------------------------------------------------------------------
-// Version : v0.6.0 Structure Score
+// Version : v0.7.0 Higher-Timeframe Context
 // Type    : Indicator
 //
-// This release adds a transparent 0-100 local structure score. It measures
-// confidence in the current structure state; it does not generate trade
-// signals and does not include multi-timeframe context yet.
+// This release adds confirmed higher-timeframe structure context. The local
+// structure score remains independent; HTF alignment is presented separately
+// so an intraday setup is not confused with a swing or positional setup.
 //==============================================================================
 
 indicator(
-     title = "Parana Project v0.6.0 - Structure Score",
-     shorttitle = "PARANA v0.6",
+     title = "Parana Project v0.7.0 - HTF Context",
+     shorttitle = "PARANA v0.7",
      overlay = true,
      max_labels_count = 200,
      max_lines_count = 200,
@@ -25,7 +25,7 @@ indicator(
 //==============================================================================
 
 const string c_PROJECT_NAME = "PARANA PROJECT"
-const string c_VERSION = "v0.6.0 Structure Score"
+const string c_VERSION = "v0.7.0 HTF Context"
 const string c_ENGINE_NAME = "Parana Structure Engine"
 const string c_STATUS_RUNNING = "RUNNING"
 
@@ -35,7 +35,7 @@ const int c_MAX_SWINGS = 200
 const int c_MAX_RENDERED_LABELS = 190
 
 const int c_DASHBOARD_COLUMNS = 2
-const int c_DASHBOARD_ROWS = 12
+const int c_DASHBOARD_ROWS = 17
 
 //==============================================================================
 // 02. USER CONFIGURATION
@@ -44,7 +44,8 @@ const int c_DASHBOARD_ROWS = 12
 string cfg_groupGeneral = "01 - General"
 string cfg_groupSwing = "02 - Swing Engine"
 string cfg_groupStructure = "03 - Structure Breaks"
-string cfg_groupDev = "04 - Development"
+string cfg_groupMtf = "04 - Higher-Timeframe Context"
+string cfg_groupDev = "05 - Development"
 
 bool cfg_showDashboard = input.bool(
      defval = true,
@@ -90,6 +91,34 @@ bool cfg_showStructureBreaks = input.bool(
      title = "Show confirmed structure events",
      group = cfg_groupStructure,
      tooltip = "Shows BOS and CHoCH only after a candle closes beyond the latest confirmed swing level."
+)
+
+bool cfg_showHtfContext = input.bool(
+     defval = true,
+     title = "Show higher-timeframe context",
+     group = cfg_groupMtf,
+     tooltip = "Shows confirmed structural direction from three configurable timeframes."
+)
+
+string cfg_htfOne = input.timeframe(
+     defval = "60",
+     title = "Context timeframe 1",
+     group = cfg_groupMtf,
+     tooltip = "Use a timeframe above the chart timeframe for higher-timeframe context."
+)
+
+string cfg_htfTwo = input.timeframe(
+     defval = "240",
+     title = "Context timeframe 2",
+     group = cfg_groupMtf,
+     tooltip = "Common setting for a 15-minute execution chart: 4H."
+)
+
+string cfg_htfThree = input.timeframe(
+     defval = "D",
+     title = "Context timeframe 3",
+     group = cfg_groupMtf,
+     tooltip = "Common setting for the daily higher-timeframe market context."
 )
 
 bool cfg_developerMode = input.bool(
@@ -165,6 +194,54 @@ f_classSupportsTrend(string _classification, string _trend) =>
 
 f_scoreLabel(float _score) =>
     _score >= 85.0 ? "STRONG" : _score >= 70.0 ? "ESTABLISHED" : _score >= 50.0 ? "DEVELOPING" : "WEAK"
+
+f_directionText(int _direction) =>
+    _direction == 1 ? "BULLISH" : _direction == -1 ? "BEARISH" : "NEUTRAL"
+
+f_localDirection() =>
+    g_trendState == "BULLISH" ? 1 : g_trendState == "BEARISH" ? -1 : 0
+
+f_contextLabel(float _alignment) =>
+    _alignment >= 100.0 ? "FULLY ALIGNED" : _alignment >= 66.0 ? "PARTIALLY ALIGNED" : _alignment > 0.0 ? "CONFLICTED" : "NO HTF BIAS"
+
+// This compact, stateful structure model runs inside request.security(). It is
+// intentionally display-only in v0.7.0; the full local PSE remains the source
+// of the local score and visual structure events.
+f_htfDirection(int _pivotLength) =>
+    var float lastHigh = na
+    var float lastLow = na
+    var int trend = 0
+
+    float pivotHigh = ta.pivothigh(high, _pivotLength, _pivotLength)
+    float pivotLow = ta.pivotlow(low, _pivotLength, _pivotLength)
+
+    if not na(pivotHigh)
+        lastHigh := pivotHigh
+    if not na(pivotLow)
+        lastLow := pivotLow
+
+    if not na(lastHigh) and close > lastHigh
+        trend := 1
+    else if not na(lastLow) and close < lastLow
+        trend := -1
+    trend
+
+f_htfAlignment(int _local, int _one, int _two, int _three) =>
+    float alignment = 0.0
+    if _local != 0
+        int evaluated = 0
+        int aligned = 0
+        if _one != 0
+            evaluated += 1
+            aligned += _one == _local ? 1 : 0
+        if _two != 0
+            evaluated += 1
+            aligned += _two == _local ? 1 : 0
+        if _three != 0
+            evaluated += 1
+            aligned += _three == _local ? 1 : 0
+        alignment := evaluated > 0 ? aligned / evaluated * 100.0 : 0.0
+    alignment
 
 // The score is intentionally decomposable:
 // 35 points: a directional state exists.
@@ -344,6 +421,13 @@ float sw_pivotLow = ta.pivotlow(low, cfg_pivotLength, cfg_pivotLength)
 bool sw_newHigh = not na(sw_pivotHigh)
 bool sw_newLow = not na(sw_pivotLow)
 
+// Offset by one requested bar and use lookahead_on so the panel receives only
+// completed higher-timeframe states. This intentionally delays HTF changes by
+// one HTF bar in exchange for stable, non-repainting context.
+int mtf_directionOne = request.security(syminfo.tickerid, cfg_htfOne, f_htfDirection(cfg_pivotLength)[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+int mtf_directionTwo = request.security(syminfo.tickerid, cfg_htfTwo, f_htfDirection(cfg_pivotLength)[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+int mtf_directionThree = request.security(syminfo.tickerid, cfg_htfThree, f_htfDirection(cfg_pivotLength)[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
 //==============================================================================
 // 07. DASHBOARD
 //==============================================================================
@@ -406,6 +490,25 @@ f_renderDashboard() =>
             f_setDashboardCell(0, 11, "Last event", labelBackground, color.silver)
             f_setDashboardCell(1, 11, cfg_developerMode ? logText : g_lastStructureEvent, valueBackground, color.white)
 
+            if cfg_showHtfContext
+                int localDirection = f_localDirection()
+                float htfAlignment = f_htfAlignment(localDirection, mtf_directionOne, mtf_directionTwo, mtf_directionThree)
+
+                f_setDashboardCell(0, 12, "HTF " + cfg_htfOne, labelBackground, color.silver)
+                f_setDashboardCell(1, 12, f_directionText(mtf_directionOne), valueBackground, color.white)
+
+                f_setDashboardCell(0, 13, "HTF " + cfg_htfTwo, labelBackground, color.silver)
+                f_setDashboardCell(1, 13, f_directionText(mtf_directionTwo), valueBackground, color.white)
+
+                f_setDashboardCell(0, 14, "HTF " + cfg_htfThree, labelBackground, color.silver)
+                f_setDashboardCell(1, 14, f_directionText(mtf_directionThree), valueBackground, color.white)
+
+                f_setDashboardCell(0, 15, "HTF alignment", labelBackground, color.silver)
+                f_setDashboardCell(1, 15, str.tostring(htfAlignment, "#.0") + " %", valueBackground, color.white)
+
+                f_setDashboardCell(0, 16, "Context", labelBackground, color.silver)
+                f_setDashboardCell(1, 16, f_contextLabel(htfAlignment), valueBackground, color.white)
+
 //==============================================================================
 // 08. MAIN LOOP
 //==============================================================================
@@ -467,6 +570,6 @@ else if str_bearBreak
 f_renderDashboard()
 
 //==============================================================================
-// END OF v0.6.0 STRUCTURE SCORE
-// Next planned increment: v0.7.0 Higher-timeframe structure context.
+// END OF v0.7.0 HIGHER-TIMEFRAME CONTEXT
+// Next planned increment: v0.8.0 Trade Horizon classification.
 //==============================================================================

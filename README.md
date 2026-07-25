@@ -1,25 +1,19 @@
 //@version=6
 //==============================================================================
-// PARANÁ PROJECT
+// PARANA PROJECT
 // Institutional Market Intelligence
 //------------------------------------------------------------------------------
-// Version : v0.1.0 Foundation
-// Script  : Indicator scaffold
-// Engine  : Paraná Swing Engine (PSE) - foundation only
+// Version : v0.2.0 Swing Engine
+// Type    : Indicator
 //
-// Purpose
-// This release establishes the stable framework used by future Paraná engines.
-// It intentionally does NOT generate trade signals, scores, HH/HL labels,
-// BOS, CHoCH, or entries.  The Swing Engine is represented by its data model
-// and its integration points, ready for the next sprint.
-//
-// Development rule: a new engine may consume Core data, but must not change
-// the meaning of a previously confirmed data structure without a new version.
+// This release detects confirmed price pivots, applies an initial noise filter,
+// enforces High/Low alternation, stores accepted swings, and optionally draws
+// non-repainting SH / SL labels. It does not issue trade signals.
 //==============================================================================
 
 indicator(
-     title = "Paraná Project v0.1.0 — Foundation",
-     shorttitle = "PARANÁ v0.1",
+     title = "Parana Project v0.2.0 - Swing Engine",
+     shorttitle = "PARANA v0.2",
      overlay = true,
      max_labels_count = 200,
      max_lines_count = 200,
@@ -30,38 +24,39 @@ indicator(
 // 01. PROJECT CONSTANTS
 //==============================================================================
 
-const string c_PROJECT_NAME = "PARANÁ PROJECT"
-const string c_VERSION      = "v0.1.0 Foundation"
-const string c_ENGINE_NAME  = "Core Framework"
-const string c_STATUS_READY = "READY"
+const string c_PROJECT_NAME = "PARANA PROJECT"
+const string c_VERSION = "v0.2.0 Swing Engine"
+const string c_ENGINE_NAME = "Parana Swing Engine"
+const string c_STATUS_RUNNING = "RUNNING"
 
 const int c_SWING_HIGH = 1
-const int c_SWING_LOW  = -1
+const int c_SWING_LOW = -1
 const int c_MAX_SWINGS = 200
+const int c_MAX_RENDERED_LABELS = 190
 
 const int c_DASHBOARD_COLUMNS = 2
-const int c_DASHBOARD_ROWS    = 9
+const int c_DASHBOARD_ROWS = 9
 
 //==============================================================================
 // 02. USER CONFIGURATION
 //==============================================================================
 
-string cfg_groupGeneral = "01 · General"
-string cfg_groupSwing   = "02 · Swing Engine (reserved)"
-string cfg_groupDev     = "03 · Development"
+string cfg_groupGeneral = "01 - General"
+string cfg_groupSwing = "02 - Swing Engine"
+string cfg_groupDev = "03 - Development"
 
 bool cfg_showDashboard = input.bool(
      defval = true,
      title = "Show dashboard",
      group = cfg_groupGeneral,
-     tooltip = "Shows the Paraná Project status panel in the top-right corner."
+     tooltip = "Shows the Parana status panel in the top-right corner."
 )
 
-bool cfg_showEngineStatus = input.bool(
+bool cfg_showSwings = input.bool(
      defval = true,
-     title = "Show engine status",
+     title = "Show confirmed swings",
      group = cfg_groupGeneral,
-     tooltip = "Displays the current foundation status in the dashboard."
+     tooltip = "Draws SH and SL only after pivot confirmation."
 )
 
 int cfg_pivotLength = input.int(
@@ -70,31 +65,38 @@ int cfg_pivotLength = input.int(
      minval = 2,
      maxval = 50,
      group = cfg_groupSwing,
-     tooltip = "Reserved for Swing Engine v0.2.0. No pivot is evaluated in this release."
+     tooltip = "Bars required on each side to confirm a pivot. Higher values show fewer, more significant swings."
 )
 
 float cfg_minSwingDistancePct = input.float(
      defval = 0.40,
-     title = "Minimum swing distance (%)",
+     title = "Minimum distance (%)",
      minval = 0.01,
      step = 0.05,
      group = cfg_groupSwing,
-     tooltip = "Reserved for the Paraná swing-quality filter."
+     tooltip = "Minimum percentage distance from the previous accepted swing."
+)
+
+bool cfg_showStrength = input.bool(
+     defval = false,
+     title = "Show swing strength",
+     group = cfg_groupSwing,
+     tooltip = "Adds the initial 0-100 strength estimate to swing labels."
 )
 
 bool cfg_developerMode = input.bool(
      defval = false,
      title = "Developer mode",
      group = cfg_groupDev,
-     tooltip = "Shows internal framework information; it does not change analysis."
+     tooltip = "Displays the latest accepted or rejected pivot event in the dashboard."
 )
 
 //==============================================================================
 // 03. CORE DATA TYPES
 //==============================================================================
 
-// A Swing is the durable data contract between the Swing Engine and every
-// future engine. Fields may be populated progressively in later releases.
+// Swing is the durable contract consumed by future Structure, Liquidity, and
+// Wyckoff engines. Fields not used in this release are intentionally present.
 type Swing
     int id
     int kind
@@ -114,9 +116,10 @@ type Swing
 //==============================================================================
 
 var array<Swing> g_swings = array.new<Swing>(0)
+var array<label> g_swingLabels = array.new<label>(0)
 var int g_nextSwingId = 1
-var string g_lastLog = "Core initialized"
-var string g_engineStatus = c_STATUS_READY
+var string g_lastLog = "Engine initialized"
+var string g_engineStatus = c_STATUS_RUNNING
 
 var table g_dashboard = table.new(
      position.top_right,
@@ -138,71 +141,100 @@ f_boolText(bool _value) =>
 f_swingKindText(int _kind) =>
     _kind == c_SWING_HIGH ? "HIGH" : _kind == c_SWING_LOW ? "LOW" : "UNKNOWN"
 
-f_engineStatusText() =>
-    // Integration point for later engines. Keep this function deterministic.
-    g_engineStatus
+f_swingShortText(int _kind) =>
+    _kind == c_SWING_HIGH ? "SH" : _kind == c_SWING_LOW ? "SL" : "?"
 
-f_foundationLogText() =>
-    cfg_developerMode ? g_lastLog : "Developer mode disabled"
+f_statusColor(string _status) =>
+    _status == c_STATUS_RUNNING ? color.new(color.lime, 78) : color.new(color.orange, 78)
 
-f_cellColor(string _status) =>
-    _status == c_STATUS_READY ? color.new(color.lime, 78) : color.new(color.orange, 78)
-
-//==============================================================================
-// 06. LOGGER SCAFFOLD
-//==============================================================================
-
-// Pine Script has no external console. The project logger is deliberately
-// lightweight and feeds the dashboard while development is in progress.
-if barstate.isfirst
-    g_lastLog := "Foundation loaded on " + syminfo.ticker + " · " + timeframe.period
+f_lastSwingText() =>
+    if array.size(g_swings) == 0
+        "None"
+    else
+        Swing lastSwing = array.get(g_swings, array.size(g_swings) - 1)
+        f_swingShortText(lastSwing.kind) + " @ " + str.tostring(lastSwing.price, format.mintick)
 
 //==============================================================================
-// 07. SWING ENGINE SCAFFOLD
+// 06. SWING ENGINE
 //==============================================================================
 
-// This function centralizes storage so future Swing Engine versions never
-// write directly to the global array from multiple locations.
 f_storeSwing(Swing _swing) =>
     if array.size(g_swings) >= c_MAX_SWINGS
         array.shift(g_swings)
     array.push(g_swings, _swing)
 
-// Factory kept here so every Swing begins with the same explicit state.
-f_newSwing(int _kind, float _price, int _barIndex, int _timestamp) =>
+f_newSwing(int _kind, float _price, int _barIndex, int _timestamp, float _strength) =>
     Swing.new(
          g_nextSwingId,
          _kind,
          _price,
          _barIndex,
          _timestamp,
+         true,
          false,
-         false,
+         _strength,
          na,
          na,
-         na,
-         na,
-         "candidate"
+         _strength,
+         "confirmed"
     )
 
-// Reserved integration point.
-// v0.1.0 does not yet call ta.pivothigh()/ta.pivotlow(). This ensures the
-// first release is a non-repainting, compile-safe framework before market
-// structure logic is introduced and visually validated.
-bool sw_hasCandidate = false
-bool sw_candidateIsHigh = false
-float sw_candidatePrice = na
-int sw_candidateBarIndex = na
-int sw_candidateTime = na
+// An accepted swing must alternate direction and move far enough from the
+// previous accepted one. The first confirmed pivot always initializes memory.
+f_isSwingAccepted(int _kind, float _price) =>
+    bool accepted = true
+    if array.size(g_swings) > 0
+        Swing lastSwing = array.get(g_swings, array.size(g_swings) - 1)
+        bool alternates = _kind != lastSwing.kind
+        float distancePct = lastSwing.price != 0.0 ? math.abs(_price - lastSwing.price) / lastSwing.price * 100.0 : 0.0
+        accepted := alternates and distancePct >= cfg_minSwingDistancePct
+    accepted
 
-// Placeholders retained as explicit variables for the next Swing Engine sprint.
-// They make configuration and Core-to-engine data flow visible without claiming
-// that a market-structure event has occurred.
-int sw_configuredPivotLength = cfg_pivotLength
-float sw_configuredMinDistance = cfg_minSwingDistancePct
+// The first version of strength measures only price separation. ATR and volume
+// components will be added in later releases without changing the 0-100 scale.
+f_swingStrength(float _price) =>
+    float strength = 50.0
+    if array.size(g_swings) > 0
+        Swing lastSwing = array.get(g_swings, array.size(g_swings) - 1)
+        float distancePct = lastSwing.price != 0.0 ? math.abs(_price - lastSwing.price) / lastSwing.price * 100.0 : 0.0
+        float minimum = math.max(cfg_minSwingDistancePct, 0.01)
+        strength := math.min(100.0, 50.0 + distancePct / minimum * 10.0)
+    strength
+
+f_drawSwing(Swing _swing) =>
+    if cfg_showSwings
+        string text = f_swingShortText(_swing.kind)
+        if cfg_showStrength
+            text += " " + str.tostring(_swing.strength, "#.0")
+
+        color swingColor = _swing.kind == c_SWING_HIGH ? color.red : color.lime
+        labelStyle = _swing.kind == c_SWING_HIGH ? label.style_label_down : label.style_label_up
+        label newLabel = label.new(
+             _swing.barIndex,
+             _swing.price,
+             text,
+             xloc = xloc.bar_index,
+             yloc = yloc.price,
+             color = swingColor,
+             style = labelStyle,
+             textcolor = color.white,
+             size = size.tiny
+        )
+
+        if array.size(g_swingLabels) >= c_MAX_RENDERED_LABELS
+            label.delete(array.shift(g_swingLabels))
+        array.push(g_swingLabels, newLabel)
+
+// A pivot is available only cfg_pivotLength bars after it occurred. Once this
+// code receives it, the corresponding SH/SL label cannot repaint.
+float sw_pivotHigh = ta.pivothigh(high, cfg_pivotLength, cfg_pivotLength)
+float sw_pivotLow = ta.pivotlow(low, cfg_pivotLength, cfg_pivotLength)
+
+bool sw_newHigh = not na(sw_pivotHigh)
+bool sw_newLow = not na(sw_pivotLow)
 
 //==============================================================================
-// 08. DASHBOARD
+// 07. DASHBOARD
 //==============================================================================
 
 f_setDashboardCell(int _column, int _row, string _text, color _background, color _textColor) =>
@@ -232,7 +264,7 @@ f_renderDashboard() =>
             f_setDashboardCell(1, 1, c_ENGINE_NAME, valueBackground, color.white)
 
             f_setDashboardCell(0, 2, "Status", labelBackground, color.silver)
-            f_setDashboardCell(1, 2, f_engineStatusText(), f_cellColor(f_engineStatusText()), color.white)
+            f_setDashboardCell(1, 2, g_engineStatus, f_statusColor(g_engineStatus), color.white)
 
             f_setDashboardCell(0, 3, "Symbol", labelBackground, color.silver)
             f_setDashboardCell(1, 3, syminfo.ticker, valueBackground, color.white)
@@ -243,38 +275,45 @@ f_renderDashboard() =>
             f_setDashboardCell(0, 5, "Stored swings", labelBackground, color.silver)
             f_setDashboardCell(1, 5, str.tostring(array.size(g_swings)), valueBackground, color.white)
 
-            f_setDashboardCell(0, 6, "Swing engine", labelBackground, color.silver)
-            f_setDashboardCell(1, 6, "Reserved for v0.2.0", valueBackground, color.white)
+            f_setDashboardCell(0, 6, "Last swing", labelBackground, color.silver)
+            f_setDashboardCell(1, 6, f_lastSwingText(), valueBackground, color.white)
 
-            f_setDashboardCell(0, 7, "Developer mode", labelBackground, color.silver)
-            f_setDashboardCell(1, 7, f_boolText(cfg_developerMode), valueBackground, color.white)
+            f_setDashboardCell(0, 7, "Pivot length", labelBackground, color.silver)
+            f_setDashboardCell(1, 7, str.tostring(cfg_pivotLength), valueBackground, color.white)
 
-            string logText = cfg_showEngineStatus ? f_foundationLogText() : "Status display disabled"
+            string logText = cfg_developerMode ? g_lastLog : "Enable Developer mode for log"
             f_setDashboardCell(0, 8, "Log", labelBackground, color.silver)
             f_setDashboardCell(1, 8, logText, valueBackground, color.white)
 
 //==============================================================================
-// 09. MAIN LOOP
+// 08. MAIN LOOP
 //==============================================================================
 
-// Foundation release: Core state is live, while the actual non-repainting
-// candidate detector will be added only after this scaffold is compiled and
-// checked in TradingView across multiple assets/timeframes.
-if sw_hasCandidate
-    Swing sw_candidate = f_newSwing(
-         sw_candidateIsHigh ? c_SWING_HIGH : c_SWING_LOW,
-         sw_candidatePrice,
-         sw_candidateBarIndex,
-         sw_candidateTime
-    )
-    f_storeSwing(sw_candidate)
-    g_nextSwingId += 1
-    g_lastLog := "Swing candidate stored: " + f_swingKindText(sw_candidate.kind)
+if sw_newHigh
+    float strength = f_swingStrength(sw_pivotHigh)
+    if f_isSwingAccepted(c_SWING_HIGH, sw_pivotHigh)
+        Swing newSwing = f_newSwing(c_SWING_HIGH, sw_pivotHigh, bar_index - cfg_pivotLength, time[cfg_pivotLength], strength)
+        f_storeSwing(newSwing)
+        f_drawSwing(newSwing)
+        g_nextSwingId += 1
+        g_lastLog := "Accepted SH: " + str.tostring(sw_pivotHigh, format.mintick)
+    else
+        g_lastLog := "Rejected SH: alternation or distance filter"
+
+else if sw_newLow
+    float strength = f_swingStrength(sw_pivotLow)
+    if f_isSwingAccepted(c_SWING_LOW, sw_pivotLow)
+        Swing newSwing = f_newSwing(c_SWING_LOW, sw_pivotLow, bar_index - cfg_pivotLength, time[cfg_pivotLength], strength)
+        f_storeSwing(newSwing)
+        f_drawSwing(newSwing)
+        g_nextSwingId += 1
+        g_lastLog := "Accepted SL: " + str.tostring(sw_pivotLow, format.mintick)
+    else
+        g_lastLog := "Rejected SL: alternation or distance filter"
 
 f_renderDashboard()
 
 //==============================================================================
-// END OF v0.1.0 FOUNDATION
-// Next planned increment: v0.2.0 Paraná Swing Engine candidate detection,
-// alternating swing validation, and visual labels for confirmed swings.
+// END OF v0.2.0 SWING ENGINE
+// Next planned increment: v0.3.0 Swing classification (HH, HL, LH, LL).
 //==============================================================================

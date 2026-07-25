@@ -3,17 +3,17 @@
 // PARANA PROJECT
 // Institutional Market Intelligence
 //------------------------------------------------------------------------------
-// Version : v0.5.0 CHoCH
+// Version : v0.6.0 Structure Score
 // Type    : Indicator
 //
-// This release distinguishes a continuation break (BOS) from a break against
-// the active trend (CHoCH). Events are still diagnostic; no trade signals are
-// generated.
+// This release adds a transparent 0-100 local structure score. It measures
+// confidence in the current structure state; it does not generate trade
+// signals and does not include multi-timeframe context yet.
 //==============================================================================
 
 indicator(
-     title = "Parana Project v0.5.0 - CHoCH",
-     shorttitle = "PARANA v0.5",
+     title = "Parana Project v0.6.0 - Structure Score",
+     shorttitle = "PARANA v0.6",
      overlay = true,
      max_labels_count = 200,
      max_lines_count = 200,
@@ -25,7 +25,7 @@ indicator(
 //==============================================================================
 
 const string c_PROJECT_NAME = "PARANA PROJECT"
-const string c_VERSION = "v0.5.0 CHoCH"
+const string c_VERSION = "v0.6.0 Structure Score"
 const string c_ENGINE_NAME = "Parana Structure Engine"
 const string c_STATUS_RUNNING = "RUNNING"
 
@@ -35,7 +35,7 @@ const int c_MAX_SWINGS = 200
 const int c_MAX_RENDERED_LABELS = 190
 
 const int c_DASHBOARD_COLUMNS = 2
-const int c_DASHBOARD_ROWS = 10
+const int c_DASHBOARD_ROWS = 12
 
 //==============================================================================
 // 02. USER CONFIGURATION
@@ -158,6 +158,47 @@ f_swingShortText(int _kind) =>
 
 f_statusColor(string _status) =>
     _status == c_STATUS_RUNNING ? color.new(color.lime, 78) : color.new(color.orange, 78)
+
+f_classSupportsTrend(string _classification, string _trend) =>
+    (_trend == "BULLISH" and (_classification == "HH" or _classification == "HL")) or
+     (_trend == "BEARISH" and (_classification == "LH" or _classification == "LL"))
+
+f_scoreLabel(float _score) =>
+    _score >= 85.0 ? "STRONG" : _score >= 70.0 ? "ESTABLISHED" : _score >= 50.0 ? "DEVELOPING" : "WEAK"
+
+// The score is intentionally decomposable:
+// 35 points: a directional state exists.
+// 25 points: the most recent swing supports that state.
+// 25 points: the latest event is a BOS in that direction.
+// 15 points: recent swings are structurally consistent with that direction.
+f_structureScore() =>
+    float score = 0.0
+
+    if g_trendState != "NEUTRAL"
+        score += 35.0
+
+        if array.size(g_swings) > 0
+            Swing lastSwing = array.get(g_swings, array.size(g_swings) - 1)
+            if f_classSupportsTrend(lastSwing.state, g_trendState)
+                score += 25.0
+
+        bool lastEventSupportsTrend =
+             (g_trendState == "BULLISH" and str.contains(g_lastStructureEvent, "BOS UP")) or
+             (g_trendState == "BEARISH" and str.contains(g_lastStructureEvent, "BOS DOWN"))
+        if lastEventSupportsTrend
+            score += 25.0
+
+        int swingCount = array.size(g_swings)
+        int sampleSize = math.min(swingCount, 4)
+        int supportingSwings = 0
+        if sampleSize > 0
+            for i = 0 to sampleSize - 1
+                Swing sampledSwing = array.get(g_swings, swingCount - 1 - i)
+                if f_classSupportsTrend(sampledSwing.state, g_trendState)
+                    supportingSwings += 1
+            score += supportingSwings / sampleSize * 15.0
+
+    math.min(score, 100.0)
 
 f_lastSwingText() =>
     if array.size(g_swings) == 0
@@ -354,9 +395,16 @@ f_renderDashboard() =>
             f_setDashboardCell(0, 8, "Trend state", labelBackground, color.silver)
             f_setDashboardCell(1, 8, g_trendState, valueBackground, color.white)
 
+            float structureScore = f_structureScore()
+            f_setDashboardCell(0, 9, "Structure score", labelBackground, color.silver)
+            f_setDashboardCell(1, 9, str.tostring(structureScore, "#.0") + " / 100", valueBackground, color.white)
+
+            f_setDashboardCell(0, 10, "Score quality", labelBackground, color.silver)
+            f_setDashboardCell(1, 10, f_scoreLabel(structureScore), valueBackground, color.white)
+
             string logText = cfg_developerMode ? g_lastLog : "Enable Developer mode for log"
-            f_setDashboardCell(0, 9, "Last event", labelBackground, color.silver)
-            f_setDashboardCell(1, 9, cfg_developerMode ? logText : g_lastStructureEvent, valueBackground, color.white)
+            f_setDashboardCell(0, 11, "Last event", labelBackground, color.silver)
+            f_setDashboardCell(1, 11, cfg_developerMode ? logText : g_lastStructureEvent, valueBackground, color.white)
 
 //==============================================================================
 // 08. MAIN LOOP
@@ -419,6 +467,6 @@ else if str_bearBreak
 f_renderDashboard()
 
 //==============================================================================
-// END OF v0.5.0 CHoCH
-// Next planned increment: v0.6.0 Structure score and multi-timeframe context.
+// END OF v0.6.0 STRUCTURE SCORE
+// Next planned increment: v0.7.0 Higher-timeframe structure context.
 //==============================================================================

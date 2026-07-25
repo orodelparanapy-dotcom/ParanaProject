@@ -3,16 +3,17 @@
 // PARANA PROJECT
 // Institutional Market Intelligence
 //------------------------------------------------------------------------------
-// Version : v1.1.0 Liquidity Diagnostics
+// Version : v1.2.0 Liquidity Score
 // Type    : Indicator
 //
-// This release adds equal-high/equal-low liquidity zones and confirmed sweep
-// diagnostics. It remains diagnostic and does not emit trade instructions.
+// This release scores recent liquidity diagnostics and integrates them into
+// the Decision Profile. Sweeps are anchored to the candle that performed the
+// wick through the liquidity level.
 //==============================================================================
 
 indicator(
-     title = "Parana Project v1.1.0 - Liquidity Diagnostics",
-     shorttitle = "PARANA v1.1",
+     title = "Parana Project v1.2.0 - Liquidity Score",
+     shorttitle = "PARANA v1.2",
      overlay = true,
      max_labels_count = 200,
      max_lines_count = 200,
@@ -24,7 +25,7 @@ indicator(
 //==============================================================================
 
 const string c_PROJECT_NAME = "PARANA PROJECT"
-const string c_VERSION = "v1.1.0 Liquidity Diagnostics"
+const string c_VERSION = "v1.2.0 Liquidity Score"
 const string c_ENGINE_NAME = "Parana Structure Engine"
 const string c_STATUS_RUNNING = "RUNNING"
 
@@ -34,7 +35,7 @@ const int c_MAX_SWINGS = 200
 const int c_MAX_RENDERED_LABELS = 190
 
 const int c_DASHBOARD_COLUMNS = 2
-const int c_DASHBOARD_ROWS = 36
+const int c_DASHBOARD_ROWS = 38
 
 //==============================================================================
 // 02. USER CONFIGURATION
@@ -179,6 +180,15 @@ float cfg_equalLevelTolerancePct = input.float(
      tooltip = "Maximum percentage difference between two same-type swings to classify them as equal highs or lows."
 )
 
+int cfg_liquidityEventWindow = input.int(
+     defval = 20,
+     title = "Liquidity event window (bars)",
+     minval = 1,
+     maxval = 200,
+     group = cfg_groupLiquidity,
+     tooltip = "Number of bars for which the latest liquidity event influences the liquidity score."
+)
+
 bool cfg_developerMode = input.bool(
      defval = false,
      title = "Developer mode",
@@ -224,6 +234,7 @@ var int g_equalLowCount = 0
 var int g_lastHighSweepSwingId = na
 var int g_lastLowSweepSwingId = na
 var string g_lastLiquidityEvent = "None"
+var int g_lastLiquidityEventBar = na
 
 var table g_dashboard = table.new(
      position.top_right,
@@ -305,15 +316,17 @@ f_volumeParticipation(float _relativeVolume, float _confirmedClose, float _confi
      supportsBullish or supportsBearish ? "SUPPORTIVE" :
      _relativeVolume < 0.75 ? "WEAK PARTICIPATION" : "NOT CONFIRMING"
 
-// Decision Profile v1 weights:
-// Structure 45%, higher-timeframe alignment 30%, volume 25%.
+// Decision Profile v1.2 weights:
+// Structure 40%, higher-timeframe alignment 25%, volume 20%, liquidity 15%.
 // Penalties prevent a visually strong chart from receiving a high profile when
 // participation is weak or higher-timeframe context is conflicted.
-f_decisionScore(float _structureScore, float _htfAlignment, float _volumeScore) =>
-    float score = _structureScore * 0.45 + _htfAlignment * 0.30 + _volumeScore * 0.25
+f_decisionScore(float _structureScore, float _htfAlignment, float _volumeScore, float _liquidityScore) =>
+    float score = _structureScore * 0.40 + _htfAlignment * 0.25 + _volumeScore * 0.20 + _liquidityScore * 0.15
     if _volumeScore < 55.0
         score -= 10.0
     if _htfAlignment < 66.0
+        score -= 10.0
+    if _liquidityScore < 45.0
         score -= 10.0
     math.max(0.0, math.min(score, 100.0))
 
@@ -323,9 +336,10 @@ f_decisionClass(float _score) =>
 f_decisionContext(float _score) =>
     _score >= 85.0 ? "HIGH CONFLUENCE" : _score >= 70.0 ? "CONDITIONAL CONTEXT" : _score >= 60.0 ? "MIXED CONTEXT" : "WAIT FOR CLARITY"
 
-f_primaryCaution(float _structureScore, float _htfAlignment, float _volumeScore) =>
+f_primaryCaution(float _structureScore, float _htfAlignment, float _volumeScore, float _liquidityScore) =>
     _volumeScore < 55.0 ? "Low volume participation" :
      _htfAlignment < 66.0 ? "Higher-timeframe conflict" :
+     _liquidityScore < 45.0 ? "Adverse liquidity event" :
      _structureScore < 70.0 ? "Structure needs confirmation" : "No critical caution"
 
 // This compact, stateful structure model runs inside request.security(). It is
@@ -454,6 +468,35 @@ f_isEqualLevel(int _kind, float _price) =>
         isEqual := differencePct <= cfg_equalLevelTolerancePct
     isEqual
 
+f_liquidityAge() =>
+    na(g_lastLiquidityEventBar) ? na : bar_index - g_lastLiquidityEventBar
+
+// A recent sweep in the direction of the active structure is constructive;
+// a recent sweep against it is a warning. Equal levels are neutral-to-caution
+// because they represent visible, still-pending liquidity.
+f_liquidityScore() =>
+    float score = 50.0
+    int eventAge = f_liquidityAge()
+    bool eventIsRecent = not na(eventAge) and eventAge <= cfg_liquidityEventWindow
+
+    if eventIsRecent
+        bool highSweep = str.contains(g_lastLiquidityEvent, "SWEEP HIGH")
+        bool lowSweep = str.contains(g_lastLiquidityEvent, "SWEEP LOW")
+        bool equalLevel = str.contains(g_lastLiquidityEvent, "EQH") or str.contains(g_lastLiquidityEvent, "EQL")
+
+        if highSweep
+            score := g_trendState == "BEARISH" ? 85.0 : 35.0
+        else if lowSweep
+            score := g_trendState == "BULLISH" ? 85.0 : 35.0
+        else if equalLevel
+            score := 45.0
+    score
+
+f_liquidityReading(float _score) =>
+    _score >= 80.0 ? "SUPPORTIVE SWEEP" :
+     _score <= 40.0 ? "ADVERSE SWEEP" :
+     _score < 50.0 ? "PENDING LIQUIDITY" : "NO RECENT EVENT"
+
 f_lastIdByKind(int _kind) =>
     int lastId = na
     int swingCount = array.size(g_swings)
@@ -531,8 +574,8 @@ f_drawStructureBreak(bool _isBullish, float _level, string _eventText) =>
         labelStyle = _isBullish ? label.style_label_up : label.style_label_down
         label newLabel = label.new(
              bar_index,
-             _level,
-             _eventText,
+             close,
+             _eventText + "\nLevel " + str.tostring(_level, format.mintick),
              xloc = xloc.bar_index,
              yloc = yloc.price,
              color = breakColor,
@@ -564,15 +607,15 @@ f_drawEqualLevel(int _kind, float _price, int _barIndex) =>
             label.delete(array.shift(g_swingLabels))
         array.push(g_swingLabels, newLabel)
 
-f_drawLiquiditySweep(bool _isHighSweep, float _level) =>
+f_drawLiquiditySweep(bool _isHighSweep, float _level, float _sweepPrice) =>
     if cfg_showLiquidity
         string sweepText = _isHighSweep ? "SWEEP HIGH" : "SWEEP LOW"
         color sweepColor = _isHighSweep ? color.yellow : color.aqua
         labelStyle = _isHighSweep ? label.style_label_down : label.style_label_up
         label newLabel = label.new(
              bar_index,
-             _level,
-             sweepText,
+             _sweepPrice,
+             sweepText + "\nLevel " + str.tostring(_level, format.mintick),
              xloc = xloc.bar_index,
              yloc = yloc.price,
              color = sweepColor,
@@ -619,7 +662,7 @@ f_setDashboardCell(int _column, int _row, string _text, color _background, color
          _text,
          bgcolor = _background,
          text_color = _textColor,
-         text_size = size.small
+         text_size = size.tiny
     )
 
 f_renderDashboard() =>
@@ -717,7 +760,8 @@ f_renderDashboard() =>
             if cfg_showDecisionProfile
                 float decisionStructureScore = f_structureScore()
                 float decisionVolumeScore = f_volumeScore(vol_relativeConfirmed)
-                float decisionScore = f_decisionScore(decisionStructureScore, htfAlignment, decisionVolumeScore)
+                float decisionLiquidityScore = f_liquidityScore()
+                float decisionScore = f_decisionScore(decisionStructureScore, htfAlignment, decisionVolumeScore, decisionLiquidityScore)
 
                 f_setDashboardCell(0, 25, "Decision score", labelBackground, color.silver)
                 f_setDashboardCell(1, 25, str.tostring(decisionScore, "#.0") + " / 100", valueBackground, color.white)
@@ -729,29 +773,37 @@ f_renderDashboard() =>
                 f_setDashboardCell(1, 27, f_decisionContext(decisionScore), valueBackground, color.white)
 
                 f_setDashboardCell(0, 28, "Structure weight", labelBackground, color.silver)
-                f_setDashboardCell(1, 28, str.tostring(decisionStructureScore * 0.45, "#.0") + " / 45", valueBackground, color.white)
+                f_setDashboardCell(1, 28, str.tostring(decisionStructureScore * 0.40, "#.0") + " / 40", valueBackground, color.white)
 
                 f_setDashboardCell(0, 29, "HTF weight", labelBackground, color.silver)
-                f_setDashboardCell(1, 29, str.tostring(htfAlignment * 0.30, "#.0") + " / 30", valueBackground, color.white)
+                f_setDashboardCell(1, 29, str.tostring(htfAlignment * 0.25, "#.0") + " / 25", valueBackground, color.white)
 
                 f_setDashboardCell(0, 30, "Volume weight", labelBackground, color.silver)
-                f_setDashboardCell(1, 30, str.tostring(decisionVolumeScore * 0.25, "#.0") + " / 25", valueBackground, color.white)
+                f_setDashboardCell(1, 30, str.tostring(decisionVolumeScore * 0.20, "#.0") + " / 20", valueBackground, color.white)
 
-                f_setDashboardCell(0, 31, "Caution", labelBackground, color.silver)
-                f_setDashboardCell(1, 31, f_primaryCaution(decisionStructureScore, htfAlignment, decisionVolumeScore), valueBackground, color.white)
+                f_setDashboardCell(0, 31, "Liquidity weight", labelBackground, color.silver)
+                f_setDashboardCell(1, 31, str.tostring(decisionLiquidityScore * 0.15, "#.0") + " / 15", valueBackground, color.white)
+
+                f_setDashboardCell(0, 32, "Caution", labelBackground, color.silver)
+                f_setDashboardCell(1, 32, f_primaryCaution(decisionStructureScore, htfAlignment, decisionVolumeScore, decisionLiquidityScore), valueBackground, color.white)
 
             if cfg_showLiquidity
-                f_setDashboardCell(0, 32, "Liquidity status", labelBackground, color.silver)
-                f_setDashboardCell(1, 32, g_lastLiquidityEvent == "None" ? "MONITORING" : "EVENT DETECTED", valueBackground, color.white)
+                float liquidityScore = f_liquidityScore()
+                int liquidityAge = f_liquidityAge()
+                f_setDashboardCell(0, 33, "Liquidity status", labelBackground, color.silver)
+                f_setDashboardCell(1, 33, f_liquidityReading(liquidityScore), valueBackground, color.white)
 
-                f_setDashboardCell(0, 33, "Equal highs", labelBackground, color.silver)
-                f_setDashboardCell(1, 33, str.tostring(g_equalHighCount), valueBackground, color.white)
+                f_setDashboardCell(0, 34, "Liquidity score", labelBackground, color.silver)
+                f_setDashboardCell(1, 34, str.tostring(liquidityScore, "#.0") + " / 100", valueBackground, color.white)
 
-                f_setDashboardCell(0, 34, "Equal lows", labelBackground, color.silver)
-                f_setDashboardCell(1, 34, str.tostring(g_equalLowCount), valueBackground, color.white)
+                f_setDashboardCell(0, 35, "Equal H / L", labelBackground, color.silver)
+                f_setDashboardCell(1, 35, str.tostring(g_equalHighCount) + " / " + str.tostring(g_equalLowCount), valueBackground, color.white)
 
-                f_setDashboardCell(0, 35, "Last liquidity", labelBackground, color.silver)
-                f_setDashboardCell(1, 35, g_lastLiquidityEvent, valueBackground, color.white)
+                f_setDashboardCell(0, 36, "Last liquidity", labelBackground, color.silver)
+                f_setDashboardCell(1, 36, g_lastLiquidityEvent, valueBackground, color.white)
+
+                f_setDashboardCell(0, 37, "Event age", labelBackground, color.silver)
+                f_setDashboardCell(1, 37, na(liquidityAge) ? "N/A" : str.tostring(liquidityAge) + " bars", valueBackground, color.white)
 
 //==============================================================================
 // 08. MAIN LOOP
@@ -768,6 +820,7 @@ if sw_newHigh
         if isEqualHigh
             g_equalHighCount += 1
             g_lastLiquidityEvent := "EQH @ " + str.tostring(sw_pivotHigh, format.mintick)
+            g_lastLiquidityEventBar := bar_index
             f_drawEqualLevel(c_SWING_HIGH, sw_pivotHigh, bar_index - cfg_pivotLength)
         g_nextSwingId += 1
         g_lastLog := "Accepted " + classification + ": " + str.tostring(sw_pivotHigh, format.mintick)
@@ -785,6 +838,7 @@ else if sw_newLow
         if isEqualLow
             g_equalLowCount += 1
             g_lastLiquidityEvent := "EQL @ " + str.tostring(sw_pivotLow, format.mintick)
+            g_lastLiquidityEventBar := bar_index
             f_drawEqualLevel(c_SWING_LOW, sw_pivotLow, bar_index - cfg_pivotLength)
         g_nextSwingId += 1
         g_lastLog := "Accepted " + classification + ": " + str.tostring(sw_pivotLow, format.mintick)
@@ -834,18 +888,20 @@ bool liq_lowSweep = barstate.isconfirmed and not na(liq_lastLowPrice) and low < 
 if liq_highSweep
     g_lastHighSweepSwingId := liq_lastHighId
     g_lastLiquidityEvent := "SWEEP HIGH @ " + str.tostring(liq_lastHighPrice, format.mintick)
+    g_lastLiquidityEventBar := bar_index
     g_lastLog := g_lastLiquidityEvent
-    f_drawLiquiditySweep(true, liq_lastHighPrice)
+    f_drawLiquiditySweep(true, liq_lastHighPrice, high)
 
 else if liq_lowSweep
     g_lastLowSweepSwingId := liq_lastLowId
     g_lastLiquidityEvent := "SWEEP LOW @ " + str.tostring(liq_lastLowPrice, format.mintick)
+    g_lastLiquidityEventBar := bar_index
     g_lastLog := g_lastLiquidityEvent
-    f_drawLiquiditySweep(false, liq_lastLowPrice)
+    f_drawLiquiditySweep(false, liq_lastLowPrice, low)
 
 f_renderDashboard()
 
 //==============================================================================
-// END OF v1.1.0 LIQUIDITY DIAGNOSTICS
-// Next planned increment: v1.2.0 Liquidity score and decision integration.
+// END OF v1.2.0 LIQUIDITY SCORE
+// Next planned increment: v1.3.0 BOS follow-through quality.
 //==============================================================================

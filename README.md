@@ -3,17 +3,17 @@
 // PARANA PROJECT
 // Institutional Market Intelligence
 //------------------------------------------------------------------------------
-// Version : v1.2.0 Liquidity Score
+// Version : v1.4.0 Compact Dashboard
 // Type    : Indicator
 //
-// This release scores recent liquidity diagnostics and integrates them into
-// the Decision Profile. Sweeps are anchored to the candle that performed the
-// wick through the liquidity level.
+// This release reorganizes the dashboard into a compact horizontal layout.
+// All diagnostics remain available, but the panel no longer extends below the
+// visible chart area.
 //==============================================================================
 
 indicator(
-     title = "Parana Project v1.2.0 - Liquidity Score",
-     shorttitle = "PARANA v1.2",
+     title = "Parana Project v1.4.0 - Compact Dashboard",
+     shorttitle = "PARANA v1.4",
      overlay = true,
      max_labels_count = 200,
      max_lines_count = 200,
@@ -25,7 +25,7 @@ indicator(
 //==============================================================================
 
 const string c_PROJECT_NAME = "PARANA PROJECT"
-const string c_VERSION = "v1.2.0 Liquidity Score"
+const string c_VERSION = "v1.4.0 Compact Dashboard"
 const string c_ENGINE_NAME = "Parana Structure Engine"
 const string c_STATUS_RUNNING = "RUNNING"
 
@@ -34,8 +34,8 @@ const int c_SWING_LOW = -1
 const int c_MAX_SWINGS = 200
 const int c_MAX_RENDERED_LABELS = 190
 
-const int c_DASHBOARD_COLUMNS = 2
-const int c_DASHBOARD_ROWS = 38
+const int c_DASHBOARD_COLUMNS = 6
+const int c_DASHBOARD_ROWS = 6
 
 //==============================================================================
 // 02. USER CONFIGURATION
@@ -49,7 +49,8 @@ string cfg_groupHorizon = "05 - Trade Horizon"
 string cfg_groupVolume = "06 - Volume Context"
 string cfg_groupDecision = "07 - Decision Profile"
 string cfg_groupLiquidity = "08 - Liquidity Diagnostics"
-string cfg_groupDev = "09 - Development"
+string cfg_groupBosQuality = "09 - BOS Follow-Through"
+string cfg_groupDev = "10 - Development"
 
 bool cfg_showDashboard = input.bool(
      defval = true,
@@ -189,6 +190,33 @@ int cfg_liquidityEventWindow = input.int(
      tooltip = "Number of bars for which the latest liquidity event influences the liquidity score."
 )
 
+int cfg_bosFollowThroughBars = input.int(
+     defval = 5,
+     title = "Follow-through window (bars)",
+     minval = 1,
+     maxval = 50,
+     group = cfg_groupBosQuality,
+     tooltip = "Bars evaluated after a BOS to determine whether it developed follow-through."
+)
+
+int cfg_bosAtrLength = input.int(
+     defval = 14,
+     title = "ATR length",
+     minval = 2,
+     maxval = 100,
+     group = cfg_groupBosQuality,
+     tooltip = "ATR length used to normalize BOS follow-through."
+)
+
+float cfg_bosRequiredAtrMove = input.float(
+     defval = 1.0,
+     title = "Required move (ATR)",
+     minval = 0.1,
+     step = 0.1,
+     group = cfg_groupBosQuality,
+     tooltip = "Minimum post-BOS expansion, in ATRs, required for a 100 follow-through score."
+)
+
 bool cfg_developerMode = input.bool(
      defval = false,
      title = "Developer mode",
@@ -235,6 +263,10 @@ var int g_lastHighSweepSwingId = na
 var int g_lastLowSweepSwingId = na
 var string g_lastLiquidityEvent = "None"
 var int g_lastLiquidityEventBar = na
+var int g_lastBosDirection = 0
+var float g_lastBosBreakPrice = na
+var float g_lastBosAtr = na
+var int g_lastBosEventBar = na
 
 var table g_dashboard = table.new(
      position.top_right,
@@ -320,13 +352,15 @@ f_volumeParticipation(float _relativeVolume, float _confirmedClose, float _confi
 // Structure 40%, higher-timeframe alignment 25%, volume 20%, liquidity 15%.
 // Penalties prevent a visually strong chart from receiving a high profile when
 // participation is weak or higher-timeframe context is conflicted.
-f_decisionScore(float _structureScore, float _htfAlignment, float _volumeScore, float _liquidityScore) =>
+f_decisionScore(float _structureScore, float _htfAlignment, float _volumeScore, float _liquidityScore, float _bosQuality, bool _bosEvaluated) =>
     float score = _structureScore * 0.40 + _htfAlignment * 0.25 + _volumeScore * 0.20 + _liquidityScore * 0.15
     if _volumeScore < 55.0
         score -= 10.0
     if _htfAlignment < 66.0
         score -= 10.0
     if _liquidityScore < 45.0
+        score -= 10.0
+    if _bosEvaluated and _bosQuality < 50.0
         score -= 10.0
     math.max(0.0, math.min(score, 100.0))
 
@@ -336,8 +370,9 @@ f_decisionClass(float _score) =>
 f_decisionContext(float _score) =>
     _score >= 85.0 ? "HIGH CONFLUENCE" : _score >= 70.0 ? "CONDITIONAL CONTEXT" : _score >= 60.0 ? "MIXED CONTEXT" : "WAIT FOR CLARITY"
 
-f_primaryCaution(float _structureScore, float _htfAlignment, float _volumeScore, float _liquidityScore) =>
-    _volumeScore < 55.0 ? "Low volume participation" :
+f_primaryCaution(float _structureScore, float _htfAlignment, float _volumeScore, float _liquidityScore, float _bosQuality, bool _bosEvaluated) =>
+    _bosEvaluated and _bosQuality < 50.0 ? "BOS lacks follow-through" :
+     _volumeScore < 55.0 ? "Low volume participation" :
      _htfAlignment < 66.0 ? "Higher-timeframe conflict" :
      _liquidityScore < 45.0 ? "Adverse liquidity event" :
      _structureScore < 70.0 ? "Structure needs confirmation" : "No critical caution"
@@ -650,6 +685,33 @@ float vol_relativeConfirmed = barstate.isconfirmed ? vol_relativeRaw : vol_relat
 float vol_confirmedClose = barstate.isconfirmed ? close : close[1]
 float vol_confirmedOpen = barstate.isconfirmed ? open : open[1]
 
+// Calculated on every bar so BOS quality remains consistent across history and
+// realtime execution. The event bar itself is excluded once the window ends.
+float bos_atr = ta.atr(cfg_bosAtrLength)
+float bos_postWindowHigh = ta.highest(high, cfg_bosFollowThroughBars)
+float bos_postWindowLow = ta.lowest(low, cfg_bosFollowThroughBars)
+
+f_bosAge() =>
+    na(g_lastBosEventBar) ? na : bar_index - g_lastBosEventBar
+
+f_bosIsEvaluated() =>
+    int eventAge = f_bosAge()
+    not na(eventAge) and eventAge >= cfg_bosFollowThroughBars
+
+f_bosQuality() =>
+    float quality = na
+    if f_bosIsEvaluated() and not na(g_lastBosBreakPrice) and not na(g_lastBosAtr) and g_lastBosAtr > 0.0
+        float moveInAtr = g_lastBosDirection == 1 ?
+             (bos_postWindowHigh - g_lastBosBreakPrice) / g_lastBosAtr :
+             (g_lastBosBreakPrice - bos_postWindowLow) / g_lastBosAtr
+        quality := math.max(0.0, math.min(moveInAtr / cfg_bosRequiredAtrMove * 100.0, 100.0))
+    quality
+
+f_bosQualityState(float _quality, bool _isEvaluated) =>
+    not _isEvaluated ? "PENDING" :
+     _quality >= 75.0 ? "CONFIRMED" :
+     _quality >= 50.0 ? "MODERATE" : "FAILED FOLLOW-THROUGH"
+
 //==============================================================================
 // 07. DASHBOARD
 //==============================================================================
@@ -669,7 +731,7 @@ f_renderDashboard() =>
     if barstate.islast
         table.clear(g_dashboard, 0, 0, c_DASHBOARD_COLUMNS - 1, c_DASHBOARD_ROWS - 1)
 
-        if cfg_showDashboard
+        if false and cfg_showDashboard
             color headerBackground = color.rgb(23, 35, 52)
             color labelBackground = color.new(color.rgb(23, 35, 52), 45)
             color valueBackground = color.new(color.black, 15)
@@ -761,7 +823,9 @@ f_renderDashboard() =>
                 float decisionStructureScore = f_structureScore()
                 float decisionVolumeScore = f_volumeScore(vol_relativeConfirmed)
                 float decisionLiquidityScore = f_liquidityScore()
-                float decisionScore = f_decisionScore(decisionStructureScore, htfAlignment, decisionVolumeScore, decisionLiquidityScore)
+                bool decisionBosEvaluated = f_bosIsEvaluated()
+                float decisionBosQuality = f_bosQuality()
+                float decisionScore = f_decisionScore(decisionStructureScore, htfAlignment, decisionVolumeScore, decisionLiquidityScore, decisionBosQuality, decisionBosEvaluated)
 
                 f_setDashboardCell(0, 25, "Decision score", labelBackground, color.silver)
                 f_setDashboardCell(1, 25, str.tostring(decisionScore, "#.0") + " / 100", valueBackground, color.white)
@@ -785,7 +849,7 @@ f_renderDashboard() =>
                 f_setDashboardCell(1, 31, str.tostring(decisionLiquidityScore * 0.15, "#.0") + " / 15", valueBackground, color.white)
 
                 f_setDashboardCell(0, 32, "Caution", labelBackground, color.silver)
-                f_setDashboardCell(1, 32, f_primaryCaution(decisionStructureScore, htfAlignment, decisionVolumeScore, decisionLiquidityScore), valueBackground, color.white)
+                f_setDashboardCell(1, 32, f_primaryCaution(decisionStructureScore, htfAlignment, decisionVolumeScore, decisionLiquidityScore, decisionBosQuality, decisionBosEvaluated), valueBackground, color.white)
 
             if cfg_showLiquidity
                 float liquidityScore = f_liquidityScore()
@@ -804,6 +868,76 @@ f_renderDashboard() =>
 
                 f_setDashboardCell(0, 37, "Event age", labelBackground, color.silver)
                 f_setDashboardCell(1, 37, na(liquidityAge) ? "N/A" : str.tostring(liquidityAge) + " bars", valueBackground, color.white)
+
+            bool bosEvaluated = f_bosIsEvaluated()
+            float bosQuality = f_bosQuality()
+            f_setDashboardCell(0, 38, "BOS quality", labelBackground, color.silver)
+            f_setDashboardCell(1, 38, bosEvaluated ? str.tostring(bosQuality, "#.0") + " / 100" : "PENDING", valueBackground, color.white)
+
+            f_setDashboardCell(0, 39, "BOS follow-through", labelBackground, color.silver)
+            f_setDashboardCell(1, 39, f_bosQualityState(bosQuality, bosEvaluated), valueBackground, color.white)
+
+// Compact panel: three horizontal blocks per row. The legacy detailed renderer
+// remains disabled above solely to preserve code history while this layout is
+// validated in TradingView.
+f_renderCompactDashboard() =>
+    if barstate.islast
+        table.clear(g_dashboard, 0, 0, c_DASHBOARD_COLUMNS - 1, c_DASHBOARD_ROWS - 1)
+
+        if cfg_showDashboard
+            color headerBackground = color.rgb(23, 35, 52)
+            color labelBackground = color.new(color.rgb(23, 35, 52), 45)
+            color valueBackground = color.new(color.black, 15)
+
+            float structureScore = f_structureScore()
+            float volumeScore = f_volumeScore(vol_relativeConfirmed)
+            float liquidityScore = f_liquidityScore()
+            bool bosEvaluated = f_bosIsEvaluated()
+            float bosQuality = f_bosQuality()
+            float htfAlignment = f_htfAlignment(f_localDirection(), mtf_directionOne, mtf_directionTwo, mtf_directionThree)
+            float decisionScore = f_decisionScore(structureScore, htfAlignment, volumeScore, liquidityScore, bosQuality, bosEvaluated)
+
+            f_setDashboardCell(0, 0, c_PROJECT_NAME, headerBackground, color.white)
+            f_setDashboardCell(1, 0, "v1.4", headerBackground, color.white)
+            f_setDashboardCell(2, 0, syminfo.ticker, headerBackground, color.white)
+            f_setDashboardCell(3, 0, timeframe.period, headerBackground, color.white)
+            f_setDashboardCell(4, 0, "Decision", headerBackground, color.white)
+            f_setDashboardCell(5, 0, str.tostring(decisionScore, "#.0") + " " + f_decisionClass(decisionScore), headerBackground, color.white)
+
+            f_setDashboardCell(0, 1, "Structure", labelBackground, color.silver)
+            f_setDashboardCell(1, 1, g_trendState + " " + str.tostring(structureScore, "#.0"), valueBackground, color.white)
+            f_setDashboardCell(2, 1, "HTF align", labelBackground, color.silver)
+            f_setDashboardCell(3, 1, str.tostring(htfAlignment, "#.0") + "%", valueBackground, color.white)
+            f_setDashboardCell(4, 1, "Context", labelBackground, color.silver)
+            f_setDashboardCell(5, 1, f_contextLabel(htfAlignment), valueBackground, color.white)
+
+            f_setDashboardCell(0, 2, "HTF " + cfg_htfOne, labelBackground, color.silver)
+            f_setDashboardCell(1, 2, f_directionText(mtf_directionOne), valueBackground, color.white)
+            f_setDashboardCell(2, 2, "HTF " + cfg_htfTwo, labelBackground, color.silver)
+            f_setDashboardCell(3, 2, f_directionText(mtf_directionTwo), valueBackground, color.white)
+            f_setDashboardCell(4, 2, "HTF " + cfg_htfThree, labelBackground, color.silver)
+            f_setDashboardCell(5, 2, f_directionText(mtf_directionThree), valueBackground, color.white)
+
+            f_setDashboardCell(0, 3, "Horizon", labelBackground, color.silver)
+            f_setDashboardCell(1, 3, f_tradeHorizon(), valueBackground, color.white)
+            f_setDashboardCell(2, 3, "Duration", labelBackground, color.silver)
+            f_setDashboardCell(3, 3, f_expectedDuration(), valueBackground, color.white)
+            f_setDashboardCell(4, 3, "Management", labelBackground, color.silver)
+            f_setDashboardCell(5, 3, f_horizonSupport(htfAlignment), valueBackground, color.white)
+
+            f_setDashboardCell(0, 4, "Volume", labelBackground, color.silver)
+            f_setDashboardCell(1, 4, na(vol_relativeConfirmed) ? "N/A" : str.tostring(vol_relativeConfirmed, "#.00") + "x / " + str.tostring(volumeScore, "#.0"), valueBackground, color.white)
+            f_setDashboardCell(2, 4, "Liquidity", labelBackground, color.silver)
+            f_setDashboardCell(3, 4, str.tostring(liquidityScore, "#.0") + " " + f_liquidityReading(liquidityScore), valueBackground, color.white)
+            f_setDashboardCell(4, 4, "BOS quality", labelBackground, color.silver)
+            f_setDashboardCell(5, 4, bosEvaluated ? str.tostring(bosQuality, "#.0") + " " + f_bosQualityState(bosQuality, bosEvaluated) : "PENDING", valueBackground, color.white)
+
+            f_setDashboardCell(0, 5, "Caution", labelBackground, color.silver)
+            f_setDashboardCell(1, 5, f_primaryCaution(structureScore, htfAlignment, volumeScore, liquidityScore, bosQuality, bosEvaluated), valueBackground, color.white)
+            f_setDashboardCell(2, 5, "Last event", labelBackground, color.silver)
+            f_setDashboardCell(3, 5, g_lastStructureEvent, valueBackground, color.white)
+            f_setDashboardCell(4, 5, "Last liquidity", labelBackground, color.silver)
+            f_setDashboardCell(5, 5, g_lastLiquidityEvent, valueBackground, color.white)
 
 //==============================================================================
 // 08. MAIN LOOP
@@ -864,6 +998,11 @@ if str_bullBreak
     g_lastBullBreakSwingId := str_lastHighId
     g_lastStructureEvent := eventText + " @ " + str.tostring(str_lastHighPrice, format.mintick)
     g_lastLog := g_lastStructureEvent
+    if not isChoch
+        g_lastBosDirection := 1
+        g_lastBosBreakPrice := close
+        g_lastBosAtr := bos_atr
+        g_lastBosEventBar := bar_index
     f_drawStructureBreak(true, str_lastHighPrice, eventText)
 
 else if str_bearBreak
@@ -873,6 +1012,11 @@ else if str_bearBreak
     g_lastBearBreakSwingId := str_lastLowId
     g_lastStructureEvent := eventText + " @ " + str.tostring(str_lastLowPrice, format.mintick)
     g_lastLog := g_lastStructureEvent
+    if not isChoch
+        g_lastBosDirection := -1
+        g_lastBosBreakPrice := close
+        g_lastBosAtr := bos_atr
+        g_lastBosEventBar := bar_index
     f_drawStructureBreak(false, str_lastLowPrice, eventText)
 
 // A sweep is a confirmed wick through the latest liquidity level followed by
@@ -899,9 +1043,9 @@ else if liq_lowSweep
     g_lastLog := g_lastLiquidityEvent
     f_drawLiquiditySweep(false, liq_lastLowPrice, low)
 
-f_renderDashboard()
+f_renderCompactDashboard()
 
 //==============================================================================
-// END OF v1.2.0 LIQUIDITY SCORE
-// Next planned increment: v1.3.0 BOS follow-through quality.
+// END OF v1.4.0 COMPACT DASHBOARD
+// Next planned increment: v1.5.0 Price-action confirmation context.
 //==============================================================================

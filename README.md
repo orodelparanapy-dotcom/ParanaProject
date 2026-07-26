@@ -3,7 +3,7 @@
 // PARANA PROJECT
 // Institutional Market Intelligence
 //------------------------------------------------------------------------------
-// Version : v1.7.0 Momentum and RSI Divergence
+// Version : v1.8.0 Wyckoff Candidate Engine
 // Type    : Indicator
 //
 // This release exposes confirmed structural, liquidity, and profile events as
@@ -12,8 +12,8 @@
 //==============================================================================
 
 indicator(
-     title = "Parana Project v1.7.0 - Momentum",
-     shorttitle = "PARANA v1.7",
+     title = "Parana Project v1.8.0 - Wyckoff Candidates",
+     shorttitle = "PARA v1.8",
      overlay = true,
      max_labels_count = 200,
      max_lines_count = 200,
@@ -25,7 +25,7 @@ indicator(
 //==============================================================================
 
 const string c_PROJECT_NAME = "PARANA PROJECT"
-const string c_VERSION = "v1.7.0 Momentum"
+const string c_VERSION = "v1.8.0 Wyckoff"
 const string c_ENGINE_NAME = "Parana Structure Engine"
 const string c_STATUS_RUNNING = "RUNNING"
 
@@ -35,7 +35,7 @@ const int c_MAX_SWINGS = 200
 const int c_MAX_RENDERED_LABELS = 190
 
 const int c_DASHBOARD_COLUMNS = 6
-const int c_DASHBOARD_ROWS = 8
+const int c_DASHBOARD_ROWS = 9
 
 //==============================================================================
 // 02. USER CONFIGURATION
@@ -52,8 +52,9 @@ string cfg_groupLiquidity = "08 - Liquidity Diagnostics"
 string cfg_groupBosQuality = "09 - BOS Follow-Through"
 string cfg_groupPriceAction = "10 - Price Action"
 string cfg_groupMomentum = "11 - Momentum and RSI Divergence"
-string cfg_groupAlerts = "12 - Alerts"
-string cfg_groupDev = "13 - Development"
+string cfg_groupWyckoff = "12 - Wyckoff Candidates"
+string cfg_groupAlerts = "13 - Alerts"
+string cfg_groupDev = "14 - Development"
 
 bool cfg_showDashboard = input.bool(
      defval = true,
@@ -260,6 +261,45 @@ int cfg_divergenceWindow = input.int(
      tooltip = "Bars for which the latest confirmed RSI divergence influences momentum context."
 )
 
+bool cfg_showWyckoffMarkers = input.bool(
+     defval = false,
+     title = "Show Wyckoff candidate markers",
+     group = cfg_groupWyckoff,
+     tooltip = "Shows confirmed Spring, UTAD, SOS and SOW candidate labels. Disabled by default to keep the chart clean."
+)
+
+int cfg_wyckoffRangeBars = input.int(
+     defval = 30,
+     title = "Range lookback (bars)",
+     minval = 10,
+     maxval = 200,
+     group = cfg_groupWyckoff
+)
+
+float cfg_wyckoffMaxRangeAtr = input.float(
+     defval = 15.0,
+     title = "Maximum range width (ATR)",
+     minval = 2.0,
+     step = 0.5,
+     group = cfg_groupWyckoff
+)
+
+float cfg_wyckoffMaxSlopeAtr = input.float(
+     defval = 0.50,
+     title = "Maximum range EMA slope (ATR)",
+     minval = 0.05,
+     step = 0.05,
+     group = cfg_groupWyckoff
+)
+
+int cfg_wyckoffEventWindow = input.int(
+     defval = 20,
+     title = "Candidate validity window (bars)",
+     minval = 1,
+     maxval = 200,
+     group = cfg_groupWyckoff
+)
+
 int cfg_alertDecisionThreshold = input.int(
      defval = 80,
      title = "Decision-score alert threshold",
@@ -280,8 +320,8 @@ bool cfg_developerMode = input.bool(
 // 03. CORE DATA TYPES
 //==============================================================================
 
-// Swing is the durable contract consumed by future Structure, Liquidity, and
-// Wyckoff engines. Fields not used in this release are intentionally present.
+// Swing is the durable contract consumed by Structure, Liquidity, and Wyckoff
+// candidate engines. Some fields remain reserved for future phase analysis.
 type Swing
     int id
     int kind
@@ -331,6 +371,12 @@ var string g_lastMomentumEvent = "NO RECENT DIVERGENCE"
 var int g_lastMomentumDirection = 0
 var int g_lastMomentumBar = na
 var float g_lastMomentumScore = 50.0
+var string g_lastWyckoffEvent = "NO RECENT CANDIDATE"
+var int g_lastWyckoffDirection = 0
+var int g_lastWyckoffBar = na
+var float g_lastWyckoffScore = 50.0
+var int g_pendingWyckoffDirection = 0
+var int g_pendingWyckoffBar = na
 
 var table g_dashboard = table.new(
      position.top_right,
@@ -412,13 +458,13 @@ f_volumeParticipation(float _relativeVolume, float _confirmedClose, float _confi
      supportsBullish or supportsBearish ? "SUPPORTIVE" :
      _relativeVolume < 0.75 ? "WEAK PARTICIPATION" : "NOT CONFIRMING"
 
-// Decision Profile v1.7 weights:
-// Structure 30%, higher-timeframe alignment 22%, volume 13%, liquidity 13%,
-// confirmed price action 8%, and momentum / confirmed RSI divergence 14%.
+// Decision Profile v1.8 weights:
+// Structure 27%, higher-timeframe alignment 20%, volume 12%, liquidity 12%,
+// confirmed price action 7%, momentum 12%, and Wyckoff candidates 10%.
 // Penalties prevent a visually strong chart from receiving a high profile when
 // participation is weak or higher-timeframe context is conflicted.
-f_decisionScore(float _structureScore, float _htfAlignment, float _volumeScore, float _liquidityScore, float _priceActionScore, float _momentumScore, float _bosQuality, bool _bosEvaluated) =>
-    float score = _structureScore * 0.30 + _htfAlignment * 0.22 + _volumeScore * 0.13 + _liquidityScore * 0.13 + _priceActionScore * 0.08 + _momentumScore * 0.14
+f_decisionScore(float _structureScore, float _htfAlignment, float _volumeScore, float _liquidityScore, float _priceActionScore, float _momentumScore, float _wyckoffScore, float _bosQuality, bool _bosEvaluated) =>
+    float score = _structureScore * 0.27 + _htfAlignment * 0.20 + _volumeScore * 0.12 + _liquidityScore * 0.12 + _priceActionScore * 0.07 + _momentumScore * 0.12 + _wyckoffScore * 0.10
     if _volumeScore < 55.0
         score -= 10.0
     if _htfAlignment < 66.0
@@ -427,6 +473,8 @@ f_decisionScore(float _structureScore, float _htfAlignment, float _volumeScore, 
         score -= 10.0
     if _momentumScore < 40.0
         score -= 10.0
+    if _wyckoffScore < 35.0
+        score -= 8.0
     if _bosEvaluated and _bosQuality < 50.0
         score -= 10.0
     math.max(0.0, math.min(score, 100.0))
@@ -437,12 +485,13 @@ f_decisionClass(float _score) =>
 f_decisionContext(float _score) =>
     _score >= 85.0 ? "HIGH CONFLUENCE" : _score >= 70.0 ? "CONDITIONAL CONTEXT" : _score >= 60.0 ? "MIXED CONTEXT" : "WAIT FOR CLARITY"
 
-f_primaryCaution(float _structureScore, float _htfAlignment, float _volumeScore, float _liquidityScore, float _priceActionScore, float _momentumScore, float _bosQuality, bool _bosEvaluated) =>
+f_primaryCaution(float _structureScore, float _htfAlignment, float _volumeScore, float _liquidityScore, float _priceActionScore, float _momentumScore, float _wyckoffScore, float _bosQuality, bool _bosEvaluated) =>
     _bosEvaluated and _bosQuality < 50.0 ? "BOS lacks follow-through" :
      _volumeScore < 55.0 ? "Low volume participation" :
      _htfAlignment < 66.0 ? "Higher-timeframe conflict" :
      _liquidityScore < 45.0 ? "Adverse liquidity event" :
      _momentumScore < 40.0 ? "Momentum contradicts trend" :
+     _wyckoffScore < 35.0 ? "Wyckoff candidate contradicts trend" :
      _priceActionScore < 40.0 ? "Price action contradicts trend" :
      _structureScore < 70.0 ? "Structure needs confirmation" : "No critical caution"
 
@@ -765,6 +814,16 @@ float bos_atr = ta.atr(cfg_bosAtrLength)
 float bos_postWindowHigh = ta.highest(high, cfg_bosFollowThroughBars)
 float bos_postWindowLow = ta.lowest(low, cfg_bosFollowThroughBars)
 
+// The range excludes the current bar so a sweep cannot create its own range.
+// A Wyckoff label is always a candidate: Pine cannot prove institutional intent.
+float wy_rangeHigh = ta.highest(high, cfg_wyckoffRangeBars)[1]
+float wy_rangeLow = ta.lowest(low, cfg_wyckoffRangeBars)[1]
+float wy_rangeMid = (wy_rangeHigh + wy_rangeLow) * 0.5
+float wy_rangeWidthAtr = bos_atr > 0.0 ? (wy_rangeHigh - wy_rangeLow) / bos_atr : na
+float wy_rangeEma = ta.ema(close, cfg_wyckoffRangeBars)
+float wy_rangeSlopeAtr = bos_atr > 0.0 ? math.abs(wy_rangeEma - wy_rangeEma[cfg_wyckoffRangeBars]) / bos_atr : na
+bool wy_rangeActive = not na(wy_rangeHigh) and not na(wy_rangeLow) and not na(wy_rangeWidthAtr) and wy_rangeWidthAtr <= cfg_wyckoffMaxRangeAtr and wy_rangeSlopeAtr <= cfg_wyckoffMaxSlopeAtr
+
 f_bosAge() =>
     na(g_lastBosEventBar) ? na : bar_index - g_lastBosEventBar
 
@@ -837,6 +896,40 @@ f_drawDivergence(bool _isBullish, float _price) =>
              xloc = xloc.bar_index,
              yloc = yloc.price,
              color = divergenceColor,
+             style = labelStyle,
+             textcolor = color.white,
+             size = size.tiny
+        )
+        if array.size(g_swingLabels) >= c_MAX_RENDERED_LABELS
+            label.delete(array.shift(g_swingLabels))
+        array.push(g_swingLabels, newLabel)
+
+f_wyckoffAge() =>
+    na(g_lastWyckoffBar) ? na : bar_index - g_lastWyckoffBar
+
+f_wyckoffScore() =>
+    int candidateAge = f_wyckoffAge()
+    not na(candidateAge) and candidateAge <= cfg_wyckoffEventWindow ? g_lastWyckoffScore : 50.0
+
+f_wyckoffState(float _score) =>
+    int candidateAge = f_wyckoffAge()
+    na(candidateAge) or candidateAge > cfg_wyckoffEventWindow ? "NO RECENT CANDIDATE" :
+     _score >= 70.0 ? "SUPPORTIVE" :
+     _score <= 35.0 ? "CONTRARY" : "NEUTRAL"
+
+f_drawWyckoffCandidate(int _direction, string _eventText) =>
+    if cfg_showWyckoffMarkers
+        bool isBullish = _direction == 1
+        color eventColor = isBullish ? color.new(color.green, 0) : color.new(color.red, 0)
+        labelStyle = isBullish ? label.style_label_up : label.style_label_down
+        float labelPrice = isBullish ? low : high
+        label newLabel = label.new(
+             bar_index,
+             labelPrice,
+             _eventText,
+             xloc = xloc.bar_index,
+             yloc = yloc.price,
+             color = eventColor,
              style = labelStyle,
              textcolor = color.white,
              size = size.tiny
@@ -981,7 +1074,8 @@ f_renderDashboard() =>
                 float decisionBosQuality = f_bosQuality()
                 float decisionPriceActionScore = f_priceActionScore()
                 float decisionMomentumScore = f_momentumScore()
-                float decisionScore = f_decisionScore(decisionStructureScore, htfAlignment, decisionVolumeScore, decisionLiquidityScore, decisionPriceActionScore, decisionMomentumScore, decisionBosQuality, decisionBosEvaluated)
+                float decisionWyckoffScore = f_wyckoffScore()
+                float decisionScore = f_decisionScore(decisionStructureScore, htfAlignment, decisionVolumeScore, decisionLiquidityScore, decisionPriceActionScore, decisionMomentumScore, decisionWyckoffScore, decisionBosQuality, decisionBosEvaluated)
 
                 f_setDashboardCell(0, 25, "Decision score", labelBackground, color.silver)
                 f_setDashboardCell(1, 25, str.tostring(decisionScore, "#.0") + " / 100", valueBackground, color.white)
@@ -1005,7 +1099,7 @@ f_renderDashboard() =>
                 f_setDashboardCell(1, 31, str.tostring(decisionLiquidityScore * 0.15, "#.0") + " / 15", valueBackground, color.white)
 
                 f_setDashboardCell(0, 32, "Caution", labelBackground, color.silver)
-                f_setDashboardCell(1, 32, f_primaryCaution(decisionStructureScore, htfAlignment, decisionVolumeScore, decisionLiquidityScore, decisionPriceActionScore, decisionMomentumScore, decisionBosQuality, decisionBosEvaluated), valueBackground, color.white)
+                f_setDashboardCell(1, 32, f_primaryCaution(decisionStructureScore, htfAlignment, decisionVolumeScore, decisionLiquidityScore, decisionPriceActionScore, decisionMomentumScore, decisionWyckoffScore, decisionBosQuality, decisionBosEvaluated), valueBackground, color.white)
 
             if cfg_showLiquidity
                 float liquidityScore = f_liquidityScore()
@@ -1054,11 +1148,13 @@ f_renderCompactDashboard() =>
             int priceActionAge = f_priceActionAge()
             float momentumScore = f_momentumScore()
             int momentumAge = f_momentumAge()
+            float wyckoffScore = f_wyckoffScore()
+            int wyckoffAge = f_wyckoffAge()
             float htfAlignment = f_htfAlignment(f_localDirection(), mtf_directionOne, mtf_directionTwo, mtf_directionThree)
-            float decisionScore = f_decisionScore(structureScore, htfAlignment, volumeScore, liquidityScore, priceActionScore, momentumScore, bosQuality, bosEvaluated)
+            float decisionScore = f_decisionScore(structureScore, htfAlignment, volumeScore, liquidityScore, priceActionScore, momentumScore, wyckoffScore, bosQuality, bosEvaluated)
 
             f_setDashboardCell(0, 0, c_PROJECT_NAME, headerBackground, color.white)
-            f_setDashboardCell(1, 0, "v1.6", headerBackground, color.white)
+            f_setDashboardCell(1, 0, "v1.8", headerBackground, color.white)
             f_setDashboardCell(2, 0, syminfo.ticker, headerBackground, color.white)
             f_setDashboardCell(3, 0, timeframe.period, headerBackground, color.white)
             f_setDashboardCell(4, 0, "Decision", headerBackground, color.white)
@@ -1093,7 +1189,7 @@ f_renderCompactDashboard() =>
             f_setDashboardCell(5, 4, str.tostring(priceActionScore, "#.0") + " " + f_priceActionState(priceActionScore), valueBackground, color.white)
 
             f_setDashboardCell(0, 5, "Caution", labelBackground, color.silver)
-            f_setDashboardCell(1, 5, f_primaryCaution(structureScore, htfAlignment, volumeScore, liquidityScore, priceActionScore, momentumScore, bosQuality, bosEvaluated), valueBackground, color.white)
+            f_setDashboardCell(1, 5, f_primaryCaution(structureScore, htfAlignment, volumeScore, liquidityScore, priceActionScore, momentumScore, wyckoffScore, bosQuality, bosEvaluated), valueBackground, color.white)
             f_setDashboardCell(2, 5, "Last event", labelBackground, color.silver)
             f_setDashboardCell(3, 5, g_lastStructureEvent, valueBackground, color.white)
             f_setDashboardCell(4, 5, "Last liquidity", labelBackground, color.silver)
@@ -1112,6 +1208,13 @@ f_renderCompactDashboard() =>
             f_setDashboardCell(3, 7, str.tostring(mom_rsi, "#.0"), valueBackground, color.white)
             f_setDashboardCell(4, 7, "Last divergence", labelBackground, color.silver)
             f_setDashboardCell(5, 7, g_lastMomentumEvent + (na(momentumAge) ? "" : " " + str.tostring(momentumAge) + " bars"), valueBackground, color.white)
+
+            f_setDashboardCell(0, 8, "Wyckoff", labelBackground, color.silver)
+            f_setDashboardCell(1, 8, str.tostring(wyckoffScore, "#.0") + " " + f_wyckoffState(wyckoffScore), valueBackground, color.white)
+            f_setDashboardCell(2, 8, "Range", labelBackground, color.silver)
+            f_setDashboardCell(3, 8, wy_rangeActive ? "ACTIVE" : "NO RANGE", valueBackground, color.white)
+            f_setDashboardCell(4, 8, "Last candidate", labelBackground, color.silver)
+            f_setDashboardCell(5, 8, g_lastWyckoffEvent + (na(wyckoffAge) ? "" : " " + str.tostring(wyckoffAge) + " bars"), valueBackground, color.white)
 
 //==============================================================================
 // 08. MAIN LOOP
@@ -1241,6 +1344,61 @@ else if liq_lowSweep
     g_lastLog := g_lastLiquidityEvent
     f_drawLiquiditySweep(false, liq_lastLowPrice, low)
 
+// Wyckoff candidates use a conservative sequence: an identifiable range,
+// liquidity sweep, then a later structural break with participation. They are
+// diagnostic labels, not proof of accumulation or distribution.
+int wy_pendingAge = na(g_pendingWyckoffBar) ? na : bar_index - g_pendingWyckoffBar
+if not na(wy_pendingAge) and wy_pendingAge > cfg_wyckoffEventWindow
+    g_pendingWyckoffDirection := 0
+    g_pendingWyckoffBar := na
+
+bool wy_volumeSupports = not na(vol_relativeConfirmed) and vol_relativeConfirmed >= 1.0
+bool wy_springCandidate = liq_lowSweep and wy_rangeActive and wy_volumeSupports
+bool wy_utadCandidate = liq_highSweep and wy_rangeActive and wy_volumeSupports
+
+if wy_springCandidate
+    g_lastWyckoffEvent := "SPRING CANDIDATE"
+    g_lastWyckoffDirection := 1
+    g_lastWyckoffBar := bar_index
+    g_lastWyckoffScore := 65.0
+    g_pendingWyckoffDirection := 1
+    g_pendingWyckoffBar := bar_index
+    g_lastLog := g_lastWyckoffEvent
+    f_drawWyckoffCandidate(1, "SPRING?")
+
+else if wy_utadCandidate
+    g_lastWyckoffEvent := "UTAD CANDIDATE"
+    g_lastWyckoffDirection := -1
+    g_lastWyckoffBar := bar_index
+    g_lastWyckoffScore := 65.0
+    g_pendingWyckoffDirection := -1
+    g_pendingWyckoffBar := bar_index
+    g_lastLog := g_lastWyckoffEvent
+    f_drawWyckoffCandidate(-1, "UTAD?")
+
+bool wy_sosCandidate = str_bullBreak and g_pendingWyckoffDirection == 1 and wy_volumeSupports
+bool wy_sowCandidate = str_bearBreak and g_pendingWyckoffDirection == -1 and wy_volumeSupports
+
+if wy_sosCandidate
+    g_lastWyckoffEvent := "SOS CANDIDATE"
+    g_lastWyckoffDirection := 1
+    g_lastWyckoffBar := bar_index
+    g_lastWyckoffScore := 85.0
+    g_pendingWyckoffDirection := 0
+    g_pendingWyckoffBar := na
+    g_lastLog := g_lastWyckoffEvent
+    f_drawWyckoffCandidate(1, "SOS?")
+
+else if wy_sowCandidate
+    g_lastWyckoffEvent := "SOW CANDIDATE"
+    g_lastWyckoffDirection := -1
+    g_lastWyckoffBar := bar_index
+    g_lastWyckoffScore := 85.0
+    g_pendingWyckoffDirection := 0
+    g_pendingWyckoffBar := na
+    g_lastLog := g_lastWyckoffEvent
+    f_drawWyckoffCandidate(-1, "SOW?")
+
 // Price action is contextual: a pattern only receives a high score when its
 // direction agrees with the established structure state.
 if barstate.isconfirmed
@@ -1293,10 +1451,11 @@ float alertVolumeScore = f_volumeScore(vol_relativeConfirmed)
 float alertLiquidityScore = f_liquidityScore()
 float alertPriceActionScore = f_priceActionScore()
 float alertMomentumScore = f_momentumScore()
+float alertWyckoffScore = f_wyckoffScore()
 bool alertBosEvaluated = f_bosIsEvaluated()
 float alertBosQuality = f_bosQuality()
 float alertHtfAlignment = f_htfAlignment(f_localDirection(), mtf_directionOne, mtf_directionTwo, mtf_directionThree)
-float alertDecisionScore = f_decisionScore(alertStructureScore, alertHtfAlignment, alertVolumeScore, alertLiquidityScore, alertPriceActionScore, alertMomentumScore, alertBosQuality, alertBosEvaluated)
+float alertDecisionScore = f_decisionScore(alertStructureScore, alertHtfAlignment, alertVolumeScore, alertLiquidityScore, alertPriceActionScore, alertMomentumScore, alertWyckoffScore, alertBosQuality, alertBosEvaluated)
 
 bool alertDecisionThresholdCross = alertDecisionScore >= cfg_alertDecisionThreshold and alertDecisionScore[1] < cfg_alertDecisionThreshold
 bool alertBosFailure = alertBosEvaluated and not alertBosEvaluated[1] and alertBosQuality < 50.0
@@ -1313,6 +1472,6 @@ alertcondition(alertBosFailure, "Parana BOS Follow-Through Failed", "Parana Proj
 f_renderCompactDashboard()
 
 //==============================================================================
-// END OF v1.7.0 MOMENTUM AND RSI DIVERGENCE
-// Next planned increment: conservative Wyckoff candidate engine.
+// END OF v1.8.0 WYCKOFF CANDIDATE ENGINE
+// Next planned increment: audit the integrated direction model.
 //==============================================================================
